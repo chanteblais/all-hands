@@ -60,8 +60,9 @@ file-backed dev fallback (`lib/state-store.ts`) · Vercel (when deployed).
    scratch board on localhost (`?scope=test`, "SCRATCH BOARD" banner); live
    from dev takes an explicit `?scope=live` and you should almost never need it.
 2. **Snapshot before writing to a deployed board's state**
-   (`curl -s <url>/api/kitchen-list > backup.json`). If something unexpected
-   is there, find out whose it is before overwriting.
+   (`curl -s -H "x-kitchen-key: <key>" <url>/api/kitchen-list > backup.json`
+   — deployed boards require the kitchen key since 2026-08-27). If something
+   unexpected is there, find out whose it is before overwriting.
 3. **Any shape change must be quantity-identical.** Run
    `npm run verify-quantities -- <before.html> <after.html> <state.json>`
    against a copy of real state before shipping. Two traps: `migrate()` has

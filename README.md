@@ -28,6 +28,9 @@ defaults to a **scratch board** (`?scope=test`); `?scope=live` reaches the
 The assistant drawer needs `ANTHROPIC_API_KEY` in `.env.local` (it spends
 money); without it the rest of the board works fine.
 
+With no `KITCHEN_ACCESS_KEY` set, local dev is open — no unlock screen, zero
+setup. Set one in `.env.local` to exercise the unlock flow locally.
+
 ## Production setup (one-time, owner steps)
 
 1. **Supabase**: create a project, run `migrations/001_page_content.sql` in the
@@ -35,10 +38,11 @@ money); without it the rest of the board works fine.
    the environment.
 2. **Vercel**: import the repo, add the env vars above plus `ANTHROPIC_API_KEY`
    (production + preview).
-3. ⚠️ The board is currently **unauthenticated** (see
-   `docs/architecture.md` → Auth posture) — a deliberate carry-over from its
-   unlisted-probe life. Treat the deployment URL as unlisted, and treat adding
-   auth as the first real product milestone.
+3. **Kitchen key**: set `KITCHEN_ACCESS_KEY` (production + preview) to a long
+   passphrase and give it to the caterer — the page asks for it once per
+   device. Without it, production answers **503 for every API call** (fails
+   closed rather than serving the board open); see `docs/architecture.md` →
+   Auth posture.
 
 ## Cutover from the camp app — completed 2026-08-27
 

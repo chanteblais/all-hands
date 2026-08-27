@@ -11,8 +11,8 @@
 //
 // First used 2026-08-26 to verify v5→v6 (SKU book) against the live board:
 // 49 identical rows, hash 83f5a7c8, on both the deployed page and the branch.
-// Get a state to test against with:
-//   curl -s https://<deployment>/api/kitchen-list > state.json
+// Get a state to test against with (the deployment needs the kitchen key):
+//   curl -s -H "x-kitchen-key: <key>" https://<deployment>/api/kitchen-list > state.json
 import fs from 'fs'
 import crypto from 'crypto'
 

@@ -52,6 +52,12 @@ the caterer's by construction — the prompt forbids unrequested changes to
 On localhost the page defaults to the scratch board (`?scope=test`, banner);
 `?scope=live` is explicit. Print view strips checked rows and chrome.
 
+### The kitchen key (2026-08-27)
+Both API routes require a shared key (`KITCHEN_ACCESS_KEY`). First visit on a
+device shows an unlock screen; the key is remembered there after that, so the
+crew types it once and never sees a sign-in mid-shop. Local dev with no key
+set stays open. Mechanics in `architecture.md` → Auth posture.
+
 ## Shipped history (in the camp app, pre-extraction)
 
 Board v1→v6 (2026-08-04 → 2026-08-26): single list → pantry ledger →
