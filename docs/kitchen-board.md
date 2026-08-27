@@ -137,6 +137,16 @@ applies it, records it in a pending queue (mirrored to
 wire is still the whole-document PUT — transmitting ops (rev + rebase sync) is
 the planned Phase B.
 
+**And since the same day, the wire transmits them** (rev + rebase — Phase B):
+a save is `PUT {state, baseRev, ops, actor, source}`; matching rev →
+compare-and-swap write + `board_ops` audit row + new rev back; stale rev →
+409 with the winner, and the page rebases (adopt, replay pending ops, save
+again — never an unconditional overwrite). Full protocol in
+`architecture.md` → Sync model; tables in `database.md`. `actor` is a
+per-device id (`dev-…`); each op carries a `source` tag (`ui` / `ai` /
+`closeout` / `boot-replay`) and the wire batch its channel (`ui` / `beacon` /
+`legacy`).
+
 Rules the applier enforces, because replay safety depends on them:
 
 - **Id-first addressing, name fallback.** UI-built ops carry `itemId`/`pantryId`

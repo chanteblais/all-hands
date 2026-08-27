@@ -82,16 +82,31 @@ precede a real identity system; the camp app's pattern (Clerk,
 default answer when that time comes, and the header+cookie seam and
 401→unlock flow carry over to it.
 
-## Sync model
+## Sync model — rev + rebase (since 2026-08-27)
 
-**Writes are ops on the page** (since 2026-08-27): every edit — tapped, typed,
-AI-proposed or close-out — is an operation applied through the page's single
-op applier (`aiResolve` via `commit()`; vocabulary and invariants in
-`docs/kitchen-board.md` → Ops). **The wire is still last-write-wins on the
-whole state blob**: ~700 ms debounced save, 10 s poll, `sendBeacon` flush on
-page hide, localStorage offline backup (`catering-kitchen-backup-<scope>` —
-a real recovery path, proven in the 2026-08-05 incident). The pending-op queue
-(mirrored to localStorage) drains when a save lands; Phase B of this thread
-sends the ops themselves with a revision number so a stale save gets a 409 and
-the page rebases instead of stomping — the applier's determinism and
-idempotency invariants (tested by `npm run verify-ops`) exist for exactly that.
+**Writes are ops on the page**: every edit — tapped, typed, AI-proposed or
+close-out — is an operation applied through the page's single op applier
+(`aiResolve` via `commit()`; vocabulary and invariants in
+`docs/kitchen-board.md` → Ops), queued (mirrored to localStorage) until a save
+confirms it.
+
+**The wire is a compare-and-swap.** GET returns `{state, rev}`; the ~700 ms
+debounced save PUTs `{state, baseRev, ops, actor, source}`. If `baseRev`
+matches the stored rev the server writes the blob, bumps rev, appends the
+batch to `board_ops` (advisory audit — the blob stays truth) and returns the
+new rev; if stale it returns **409 + the current winner**, and the page
+*rebases*: adopts the server copy, replays its pending ops through the applier
+(deferred while an input is focused; dropping any op that no longer resolves),
+and saves again — bounded to 5 consecutive conflicts before backing off to a
+slow retry. **It never falls back to an unconditional overwrite.** Two people
+editing different fields in the same window now both survive; same-field edits
+converge last-committer-wins on that field only.
+
+The rest of the machinery is unchanged: 10 s poll (skipped while anything is
+pending; tracks rev), `sendBeacon` flush on page hide (same checked body,
+best-effort — a conflicted flush is recovered by the next boot's replay of the
+localStorage pending queue, whose safety rests on the applier's idempotency
+guards), localStorage blob backup for offline. A PUT without `baseRev` (an old
+cached page, a script) still works as an unconditional overwrite and is logged
+as `replace_state`/`legacy`. Actor identity is a per-device id — accounts are
+the open identity thread in the generalizability log.

@@ -51,10 +51,14 @@ the caterer's by construction — the prompt forbids unrequested changes to
 `per`/buffer/headcounts. **Keep every new capability on this rail.**
 
 ### Ops under the hood (2026-08-27)
-No user-visible change: every edit on the board now flows through the
-assistant's op applier via a single `commit()` (shape v7 added stable ids to
-items and pantry rows so ops can address them). Groundwork for crew-safe
-sync, history and undo — mechanics in `kitchen-board.md` → Ops.
+No user-visible change in normal use: every edit flows through the assistant's
+op applier via a single `commit()` (shape v7 added stable ids to items and
+pantry rows), and saves are a revision-checked compare-and-swap — two people
+editing in the same window no longer lose an edit (the loser's page adopts the
+winner and replays its own changes on top), a killed tab's unsaved edits
+replay on next open, and every applied batch lands in the `board_ops` audit
+log with a per-device actor id. Mechanics in `kitchen-board.md` → Ops and
+`architecture.md` → Sync model.
 
 ### Scopes
 On localhost the page defaults to the scratch board (`?scope=test`, banner);
