@@ -40,17 +40,24 @@ money); without it the rest of the board works fine.
    unlisted-probe life. Treat the deployment URL as unlisted, and treat adding
    auth as the first real product milestone.
 
-## Cutover from the camp app (when this is deployed)
+## Cutover from the camp app — completed 2026-08-27
 
-1. Deploy All Hands; smoke-test `/kitchen.html` + both API routes.
-2. Copy the board state across (one row):
-   `curl -s https://camp.glaum.ca/api/kitchen-list` → PUT the same JSON to
-   `https://<all-hands-url>/api/kitchen-list`.
-3. In the camp repo: delete `app/api/kitchen-list`, `app/api/kitchen-ai`, and
-   replace `public/kitchen.html` with a signpost page pointing at the All Hands URL
-   (same pattern as the retired standalone prototype). Update the camp docs'
-   kitchen pointers to this repo. That closes the camp app's retire-or-gate
-   thread — its only unauthenticated write endpoint and only money-spending
-   endpoint both go away.
-4. Optionally delete the two `catering_kitchen_state*` rows from the camp
-   Supabase once the copy is verified.
+Done against the first production deployment (URL deliberately kept out of
+this public repo — treat it as unlisted, per the auth posture above):
+
+1. Deployed to Vercel + Supabase per "Production setup"; smoke-tested
+   `/kitchen.html` and both API routes.
+2. Board state copied across from `camp.glaum.ca/api/kitchen-list` — both
+   rows (live + test) — and GET-verified equal (v5: 6 days, 89 pantry rows;
+   the live row self-migrated v5→v6 on first open, all data intact).
+3. Camp side stripped completely (camp repo merge `7c3be10`):
+   `app/api/kitchen-list`, `app/api/kitchen-ai`, **and** `public/kitchen.html`
+   all deleted. The originally planned signpost page was dropped on Chante's
+   call — the camp app must not link to this deployment in any way — so the
+   old URL now 404s and the caterer gets the new URL handed to him directly.
+   Camp docs' kitchen pointers now point at this repo. That closed the camp
+   app's retire-or-gate thread — its only unauthenticated write endpoint and
+   only money-spending endpoint both went away.
+4. Still open (owner steps): delete the two `catering_kitchen_state*` rows
+   from the camp Supabase, and remove `ANTHROPIC_API_KEY` from the camp
+   Vercel env (this deployment has its own).
