@@ -37,19 +37,19 @@ account and is standing in a warehouse aisle on his phone**:
 
 ## Data
 
-One `page_content` row, key `catering_kitchen_state` (v6):
+One `page_content` row, key `catering_kitchen_state` (v7):
 
 ```
-{ version: 6, usePantry, selected: [dayId],
+{ version: 7, usePantry, selected: [dayId],
   checked: { "<name>|w|c": true },
   skus:    { "<name>|w|c": "item #" },   // v6 — standing Wholesale Club SKU book
   days: [{ id, name, buffer,
            groups: [{ id, label, count }],          // who is on site, and how many
            meals:  [{ id, label, times,             // Brunch / Dinner / ...
                       sections: [{ id, name, note,
-                                   items: [{ n, unit, per, pack, note,
+                                   items: [{ id, n, unit, per, pack, note,   // id — v7
                                              groupIds: [gid] }] }] }] }],
-  pantry: [{ n, qty, unit }] }
+  pantry: [{ id, n, qty, unit }] }               // id — v7
 ```
 
 **A day is meals; an item names who eats it.** The day carries the groups on site
@@ -82,7 +82,18 @@ map, nothing else touched) and was verified quantity-identical against the
 2026-08-26 live state: both page versions run headlessly over the same snapshot
 produced the same 49 shopping rows (totals, remainders and day-parts, hash
 `83f5a7c8`). *(The shelved `feat/kitchen-prices` branch also calls its shape "v6";
-reviving it now means renumbering to v7 — the branches live in the camp repo.)*
+reviving it now means renumbering past v7 — the branches live in the camp repo.)*
+
+v7 (2026-08-27) mints **stable persisted ids** on menu items (`it.id`) and pantry
+rows (`p.id`) so operations can address rows by identity instead of
+`(dayId, sectionId, name)` / `(name, unit)`. `v6toV7` is purely additive (ids
+only, nothing else touched) and was verified quantity-identical against the
+2026-08-26 fixture board: both page versions produced the same 49 shopping rows,
+hash `48a94fbe`. The runtime `uid` stays (write-only, used for label wiring);
+`id` is the addressing field and — unlike `uid` — survives `payload()`. Two
+devices migrating the same board concurrently mint divergent ids; the last saved
+blob wins and every device converges on the next poll (ids are identity, not
+meaning, so nothing is lost).
 
 v4 → v5 (`v4toV5`) merges the per-group menus back into one set of sections,
 recording which groups each item came from; identical name+unit+**per** across menus
@@ -114,6 +125,70 @@ sack of rice. Weight math is in ounces internally, displayed in lb (+kg).
 sections. New days start blank or as a copy of an existing day (menus repeat across a
 festival week, so copying is the common path). The day chips on the Shopping list tab
 choose which days a trip covers; the Menus tab edits one day at a time.
+
+## Ops — the write path (since 2026-08-27, shape v7)
+
+**Every board edit is an operation.** The 29 UI handlers no longer mutate state
+directly: they build an op and call `commit(ops, source)`, which resolves each
+op through `aiResolve()` — the same resolver the assistant has always used —
+applies it, records it in a pending queue (mirrored to
+`localStorage['kitchen-pending-ops-<scope>']`), and queues the ordinary save.
+`aiResolve` is therefore *the* op applier; the `ai` prefix is historical. The
+wire is still the whole-document PUT — transmitting ops (rev + rebase sync) is
+the planned Phase B.
+
+Rules the applier enforces, because replay safety depends on them:
+
+- **Id-first addressing, name fallback.** UI-built ops carry `itemId`/`pantryId`
+  (v7 ids); the model still speaks names, which remain a resolution fallback.
+- **`add_*` ops carry complete objects with pre-minted ids** and refuse an id
+  that already exists; `remove_*` errors on a missing target; errored ops are
+  dropped. So replaying a batch twice is a no-op, not a duplicate.
+- **`commit()` never renders** — call sites keep their own fine-grained
+  `renderX()` calls, because a full render would rebuild the input mid-type.
+- **Per-keystroke squashing:** consecutive absolute-value ops on one target
+  (renames, buffer, headcount, portion, pantry qty, SKU, day selection,
+  pantry toggle) replace the previous pending entry.
+- **Close-out decomposes into primitives** (`set_pantry` with the absolute
+  approved quantity + `uncheck_item`, one batch, source `closeout`) — the
+  drafts hold numbers the caterer approved in the preview, and a compound op
+  would re-run the math on replay and could produce figures nobody saw.
+
+The full vocabulary (28 ops). The first 12 are the assistant's original set —
+its prompt in `app/api/kitchen-ai/route.ts` is unchanged and the model still
+uses only these:
+
+| op | fields |
+|---|---|
+| `set_pantry` | name, qty, unit?, pantryId?, id? (create path) |
+| `rename_pantry` | name, newName, unit?, pantryId? |
+| `remove_pantry` | name, unit?, pantryId? |
+| `set_headcount` | dayId, groupId, count |
+| `set_buffer` | dayId, buffer |
+| `set_portion` | dayId, sectionId, name, per, itemId? |
+| `set_item_groups` | dayId, sectionId, name, groupIds, itemId? (empty array = nobody) |
+| `add_menu_item` | dayId, mealId?, sectionId, name, unit, per, groupIds? (absent = everyone), id?, pantryId? |
+| `remove_menu_item` | dayId, sectionId, name, itemId? |
+| `check_item` / `uncheck_item` | name, unit |
+| `select_days` | dayIds (replaces the selection) |
+| `set_sku` | key, sku ('' deletes) |
+| `set_use_pantry` | on |
+| `clear_checked` | — |
+| `add_day` | day (complete, ids pre-minted; also selects it) |
+| `remove_day` | dayId (also scrubs `selected`) |
+| `rename_day` | dayId, name |
+| `add_group` / `remove_group` / `rename_group` | dayId, group / groupId (+cascade scrub of item groupIds) / groupId, label |
+| `add_meal` / `rename_meal` / `set_meal_times` / `remove_meal` | dayId, meal / mealId, label / mealId, times / mealId |
+| `add_section` | dayId, mealId, section |
+| `set_section_groups` | dayId, sectionId, groupIds |
+| `add_pantry` | row ({id, n, qty, unit}) |
+
+`scripts/verify-ops.mjs` (`npm run verify-ops`) exercises all of this
+headlessly against the fixture board: per-op parity, determinism (same ops on
+two clones → identical payloads), idempotent replay, the rebase rehearsal, and
+squashing. Like `verify-quantities.mjs` it injects into the page's IIFE tail —
+**both scripts require the file to end with `boot(); })();`**; change that tail
+and both regexes must change in the same commit.
 
 ## Sync
 

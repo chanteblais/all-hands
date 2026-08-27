@@ -50,6 +50,12 @@ state into a before/after preview; nothing mutates until Apply. Portions stay
 the caterer's by construction — the prompt forbids unrequested changes to
 `per`/buffer/headcounts. **Keep every new capability on this rail.**
 
+### Ops under the hood (2026-08-27)
+No user-visible change: every edit on the board now flows through the
+assistant's op applier via a single `commit()` (shape v7 added stable ids to
+items and pantry rows so ops can address them). Groundwork for crew-safe
+sync, history and undo — mechanics in `kitchen-board.md` → Ops.
+
 ### Scopes
 On localhost the page defaults to the scratch board (`?scope=test`, banner);
 `?scope=live` is explicit. Print view strips checked rows and chrome.

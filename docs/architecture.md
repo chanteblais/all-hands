@@ -82,11 +82,16 @@ precede a real identity system; the camp app's pattern (Clerk,
 default answer when that time comes, and the header+cookie seam and
 401→unlock flow carry over to it.
 
-## Sync model (unchanged from the camp app)
+## Sync model
 
-Last-write-wins on the whole state blob: ~700 ms debounced save, 10 s poll,
-`sendBeacon` flush on page hide, localStorage offline backup
-(`catering-kitchen-backup-<scope>` on the page's origin — a real recovery path,
-proven in the 2026-08-05 incident). Fine for a single kitchen's handful of
-devices; revisit if kitchens ever get big crews (per-field writes are the
-known upgrade, see the spec).
+**Writes are ops on the page** (since 2026-08-27): every edit — tapped, typed,
+AI-proposed or close-out — is an operation applied through the page's single
+op applier (`aiResolve` via `commit()`; vocabulary and invariants in
+`docs/kitchen-board.md` → Ops). **The wire is still last-write-wins on the
+whole state blob**: ~700 ms debounced save, 10 s poll, `sendBeacon` flush on
+page hide, localStorage offline backup (`catering-kitchen-backup-<scope>` —
+a real recovery path, proven in the 2026-08-05 incident). The pending-op queue
+(mirrored to localStorage) drains when a save lands; Phase B of this thread
+sends the ops themselves with a revision number so a stale save gets a 409 and
+the page rebases instead of stomping — the applier's determinism and
+idempotency invariants (tested by `npm run verify-ops`) exist for exactly that.
