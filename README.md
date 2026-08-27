@@ -58,6 +58,7 @@ this public repo — treat it as unlisted, per the auth posture above):
    Camp docs' kitchen pointers now point at this repo. That closed the camp
    app's retire-or-gate thread — its only unauthenticated write endpoint and
    only money-spending endpoint both went away.
-4. Still open (owner steps): delete the two `catering_kitchen_state*` rows
-   from the camp Supabase, and remove `ANTHROPIC_API_KEY` from the camp
-   Vercel env (this deployment has its own).
+4. Final owner steps done 2026-08-27: the two `catering_kitchen_state*` rows
+   deleted from the camp Supabase (select re-run confirmed 0 rows), and
+   `ANTHROPIC_API_KEY` removed from the camp Vercel env (this deployment has
+   its own). The camp app now carries no kitchen data, code, or credentials.
