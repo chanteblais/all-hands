@@ -285,6 +285,13 @@ silently change one he has set.
   credentials) — is researched but unbuilt: findings, unverified parts and ToS/fragility
   risks in `docs/wholesale-club-cart.md`. Still gated on this page not being public — see
   retire-or-gate above.
+- **⚠️ Run this before building more ordering features: can Daniel actually order the list
+  online?** Cheap invalidating test (rescued from the camp repo's deleted
+  `docs/kitchen-brief-0806` branch, ported here at extraction) — price one real day's list
+  on the Wholesale Club site and count how many lines are genuinely orderable. The *online*
+  range is narrower than in-store, thinnest in bulk meat and produce — exactly what a
+  caterer buys most. If half the list can't be ordered, the SKU book and any cart-fill
+  bookmarklet are solving the wrong problem. ~20 minutes, Daniel's call.
 - The portion defaults are standard catering planning ranges, not Daniel's numbers —
   they're starting points he's expected to correct in place.
 - **Friday's "Spicy sauce" (Ex 2)** carries a flag in the UI: it looked struck through on the
