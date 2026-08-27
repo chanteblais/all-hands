@@ -1,9 +1,12 @@
 # Architecture
 
-**Stack:** Next.js 14 (App Router) · TypeScript · Supabase (Postgres) ·
+**Stack:** Next.js 16 (App Router) · TypeScript · Supabase (Postgres) ·
 Vercel. Inherited from the camp app the product was extracted from
 (2026-08-26); kept because it is proven, boring, and lets code move between
-the two repos with minimal translation.
+the two repos with minimal translation. (One divergence, day one: the camp
+app pins Next 14, which carries a pile of high-severity advisories fixed only
+in 16 — this repo upgraded immediately while the surface was two route
+handlers; the camp app's upgrade is its own, bigger job.)
 
 ## Why the product surface is a static page
 
