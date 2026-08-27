@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getStateRaw, putStateRaw } from '@/lib/state-store'
+import { getStateWithRev, putStateChecked, putStateRaw } from '@/lib/state-store'
 import { requireAccess } from '@/lib/access'
 
 // Ported from the camp app 2026-08-26, logic unchanged; storage now goes
@@ -19,14 +19,21 @@ const KEYS: Record<string, string> = {
 }
 const keyFor = (req: NextRequest) => KEYS[req.nextUrl.searchParams.get('scope') ?? ''] ?? KEYS.live
 const MAX_BYTES = 200_000
+// The checked path also carries the op batch; the state cap alone no longer
+// bounds the body, so the batch gets its own caps.
+const MAX_OPS = 500
+const MAX_OPS_BYTES = 100_000
 
 export async function GET(req: NextRequest) {
   const denied = requireAccess(req)
   if (denied) return denied
 
   let raw: string | null
+  let rev = 0
   try {
-    raw = await getStateRaw(keyFor(req))
+    const entry = await getStateWithRev(keyFor(req))
+    raw = entry.value
+    rev = entry.rev
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Storage error'
     return NextResponse.json({ error: msg }, { status: 500 })
@@ -40,7 +47,7 @@ export async function GET(req: NextRequest) {
       state = null
     }
   }
-  return NextResponse.json({ state })
+  return NextResponse.json({ state, rev })
 }
 
 export async function PUT(req: NextRequest) {
@@ -67,6 +74,39 @@ export async function PUT(req: NextRequest) {
   const value = JSON.stringify(state)
   if (value.length > MAX_BYTES) {
     return NextResponse.json({ error: 'Too large' }, { status: 413 })
+  }
+
+  // Checked path (since 2026-08-27): a body carrying a numeric baseRev is a
+  // compare-and-swap — stale baseRev gets a 409 with the current winner and
+  // the page rebases its pending ops onto it. A body without baseRev is a
+  // legacy client (or the pre-B cached page's beacon): unconditional
+  // overwrite, exactly the old contract, logged as replace_state.
+  const b = body as { baseRev?: unknown; ops?: unknown; actor?: unknown; source?: unknown }
+  if (typeof b.baseRev === 'number') {
+    if (!Array.isArray(b.ops) || b.ops.length > MAX_OPS) {
+      return NextResponse.json({ error: 'Bad ops' }, { status: 400 })
+    }
+    if (JSON.stringify(b.ops).length > MAX_OPS_BYTES) {
+      return NextResponse.json({ error: 'Ops too large' }, { status: 413 })
+    }
+    const actor = typeof b.actor === 'string' ? b.actor.slice(0, 64) : undefined
+    const source = typeof b.source === 'string' ? b.source.slice(0, 32) : undefined
+    try {
+      const res = await putStateChecked(keyFor(req), value, b.baseRev, { ops: b.ops, actor, source })
+      if (res.ok) return NextResponse.json({ success: true, rev: res.rev })
+      let current: unknown = null
+      if (res.current.value) {
+        try {
+          current = JSON.parse(res.current.value)
+        } catch {
+          current = null
+        }
+      }
+      return NextResponse.json({ state: current, rev: res.current.rev }, { status: 409 })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Storage error'
+      return NextResponse.json({ error: msg }, { status: 500 })
+    }
   }
 
   try {

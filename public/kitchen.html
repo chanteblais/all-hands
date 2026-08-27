@@ -754,6 +754,8 @@
   var activeDayId = null, activeMealId = null;
   var uid = 1;
   var dirty = false, saving = false, saveTimer = null, lastServerJson = null;
+  var serverRev = 0;    // last revision this device knows the server holds
+  var rebaseTries = 0;  // consecutive 409s; reset on any successful save
 
   function nameKey(n) { return String(n).trim().toLowerCase(); }
   function itemKey(n, unit) { return nameKey(n) + '|' + (unit === 'oz' ? 'w' : 'c'); }
@@ -991,6 +993,25 @@
 
   function cacheLocal(j) { try { localStorage.setItem(LS_KEY, j); } catch (e) {} }
 
+  // A per-device id is all the actor identity there is (no accounts — see the
+  // generalizability log); it makes board_ops answer "which device did this".
+  function actorId() {
+    var v = null;
+    try { v = localStorage.getItem('kitchen-device-id'); } catch (e) {}
+    if (!v) {
+      v = 'dev-' + Math.random().toString(36).slice(2, 10);
+      try { localStorage.setItem('kitchen-device-id', v); } catch (e) {}
+    }
+    return v;
+  }
+
+  function saveBody(ops, source) {
+    return '{"state":' + payload() + ',"baseRev":' + serverRev
+      + ',"ops":' + JSON.stringify(ops)
+      + ',"actor":' + JSON.stringify(actorId())
+      + ',"source":' + JSON.stringify(source) + '}';
+  }
+
   function queueSave() {
     dirty = true;
     setStatus('busy', 'Saving…');
@@ -1004,7 +1025,8 @@
     saving = true;
     var body = payload();
     var sentCount = pendingOps.length; // the blob carries everything applied so far
-    fetch(API, { method: 'PUT', headers: authHeaders({ 'Content-Type': 'application/json' }), body: '{"state":' + body + '}' })
+    fetch(API, { method: 'PUT', headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: saveBody(pendingOps.slice(0, sentCount), 'ui') })
       .then(function (r) {
         saving = false;
         if (r.status === 401) {
@@ -1013,15 +1035,63 @@
           showLock(doSave);
           return;
         }
+        if (r.status === 409) {
+          // someone else saved first — rebase our pending ops onto their copy
+          return r.json().then(rebaseFrom, function () { rebaseFrom(null); });
+        }
         if (!r.ok) throw new Error('HTTP ' + r.status);
-        lastServerJson = body;
-        pendingOps = pendingOps.slice(sentCount); persistPending(); // drain what the blob covered
-        if (body === payload()) { dirty = false; setStatus('ok', 'Saved — everyone sees this board'); }
+        return r.json().then(function (d) {
+          if (d && typeof d.rev === 'number') serverRev = d.rev;
+          lastServerJson = body;
+          pendingOps = pendingOps.slice(sentCount); persistPending(); // drain what the blob covered
+          rebaseTries = 0;
+          if (body === payload()) { dirty = false; setStatus('ok', 'Saved — everyone sees this board'); }
+        });
       })
       .catch(function () {
         saving = false;
         setStatus('err', 'Offline — changes are kept on this device and will save when you reconnect');
       });
+  }
+
+  // A 409 means the server holds a newer revision. Adopt it, replay our
+  // pending ops through the applier (dropping any that no longer resolve),
+  // and save again — never overwrite unconditionally: that would reintroduce
+  // the exact stomp this protocol removes.
+  function rebaseFrom(d) {
+    rebaseTries++;
+    if (rebaseTries > 5) {
+      // stop hammering; dirty stays true and a slow timer keeps trying
+      setStatus('err', 'Board is busy — will keep retrying');
+      saveTimer = setTimeout(doSave, 10000);
+      return;
+    }
+    var tag = document.activeElement && document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT') {
+      // same guard as adoptRemote — never swap the board out mid-type
+      saveTimer = setTimeout(doSave, 2000);
+      return;
+    }
+    var m = d && d.state ? migrate(d.state) : null;
+    if (!m) {
+      setStatus('err', 'Save conflict — retrying');
+      saveTimer = setTimeout(doSave, 3000);
+      return;
+    }
+    state = m;
+    serverRev = typeof d.rev === 'number' ? d.rev : serverRev;
+    lastServerJson = JSON.stringify(d.state);
+    assignIds();
+    var keep = [];
+    pendingOps.forEach(function (op) {
+      var r = aiResolve(op);
+      if (!r.error) { r.apply(); keep.push(op); }
+    });
+    pendingOps = keep; persistPending();
+    if (!state.days.some(function (x) { return x.id === activeDayId; })) { activeDayId = state.days[0] ? state.days[0].id : null; activeMealId = null; }
+    render();
+    setStatus('busy', 'Merging changes…');
+    saveTimer = setTimeout(doSave, 200);
   }
 
   // ---------- ops: the single write primitive ----------
@@ -1068,6 +1138,7 @@
       var r = aiResolve(op);
       if (r.error) return;
       r.apply();
+      if (source && !op.source) op.source = source; // forensic tag, rides into board_ops
       var k = opSquashKey(op), last = pendingOps[pendingOps.length - 1];
       if (k && last && opSquashKey(last) === k) pendingOps[pendingOps.length - 1] = op;
       else pendingOps.push(op);
@@ -1089,12 +1160,15 @@
   }
 
   function poll() {
-    if (dirty || saving || !$lock.hidden) return;
+    if (dirty || saving || pendingOps.length || !$lock.hidden) return;
     fetch(API, { cache: 'no-store', headers: authHeaders() }).then(function (r) {
       if (r.status === 401) { showLock(); return null; }
       return r.json();
     }).then(function (d) {
       if (!d || !d.state) return;
+      // nothing is pending (the gate above), so tracking the server's rev is
+      // always safe here — and required, or the next save would 409 forever
+      if (typeof d.rev === 'number') serverRev = d.rev;
       var json = JSON.stringify(d.state);
       if (json !== lastServerJson && json !== payload()) { lastServerJson = json; adoptRemote(d.state); }
     }).catch(function () {});
@@ -1110,13 +1184,20 @@
       var migrated = false;
       if (m) { state = m; lastServerJson = JSON.stringify(d.state); migrated = true; }
       else { state = factory(); state.selected = [state.days[0].id]; }
+      if (d && typeof d.rev === 'number') serverRev = d.rev;
       activeDayId = state.days[0] ? state.days[0].id : null;
       assignIds(); render();
       setStatus('ok', migrated ? 'Shared board — everyone here sees the same numbers' : 'New board');
-      // Phase A: the blob backup (LS_KEY) is still the crash-recovery path, so
-      // a stale pending queue from a killed tab is just noise — clear it.
-      // (Phase B replaces this with an op replay against the server state.)
+      // Crash replay: ops a dying tab never flushed (its beacon lost or
+      // conflicted) are replayed against the fresh server copy. The applier's
+      // guards make this safe when the flush actually landed: add/remove ops
+      // refuse to double-apply and absolute sets just restate themselves.
+      var savedOps = null;
+      try { savedOps = JSON.parse(localStorage.getItem(PENDING_LS) || 'null'); } catch (e) {}
       pendingOps = []; persistPending();
+      if (Array.isArray(savedOps) && savedOps.length && migrated) {
+        if (commit(savedOps, 'boot-replay')) render();
+      }
       if (!migrated || JSON.stringify(d && d.state) !== payload()) queueSave();
     }).catch(function (err) {
       if (err === 'locked') return; // unlock re-runs boot; nothing to render yet
@@ -1136,7 +1217,10 @@
 
   window.addEventListener('pagehide', function () {
     if (!dirty) return;
-    try { navigator.sendBeacon(API, new Blob(['{"state":' + payload() + '}'], { type: 'application/json' })); } catch (e) {}
+    // Best-effort, cookie-authed, no retry. A 409 here loses the flush
+    // transiently — the ops stay in localStorage and boot() replays them on
+    // the next open, which is strictly better than the old silent stomp.
+    try { navigator.sendBeacon(API, new Blob([saveBody(pendingOps, 'beacon')], { type: 'application/json' })); } catch (e) {}
   });
   document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') poll(); });
 
