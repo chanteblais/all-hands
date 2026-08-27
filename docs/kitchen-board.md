@@ -126,6 +126,70 @@ sections. New days start blank or as a copy of an existing day (menus repeat acr
 festival week, so copying is the common path). The day chips on the Shopping list tab
 choose which days a trip covers; the Menus tab edits one day at a time.
 
+## Ops — the write path (since 2026-08-27, shape v7)
+
+**Every board edit is an operation.** The 29 UI handlers no longer mutate state
+directly: they build an op and call `commit(ops, source)`, which resolves each
+op through `aiResolve()` — the same resolver the assistant has always used —
+applies it, records it in a pending queue (mirrored to
+`localStorage['kitchen-pending-ops-<scope>']`), and queues the ordinary save.
+`aiResolve` is therefore *the* op applier; the `ai` prefix is historical. The
+wire is still the whole-document PUT — transmitting ops (rev + rebase sync) is
+the planned Phase B.
+
+Rules the applier enforces, because replay safety depends on them:
+
+- **Id-first addressing, name fallback.** UI-built ops carry `itemId`/`pantryId`
+  (v7 ids); the model still speaks names, which remain a resolution fallback.
+- **`add_*` ops carry complete objects with pre-minted ids** and refuse an id
+  that already exists; `remove_*` errors on a missing target; errored ops are
+  dropped. So replaying a batch twice is a no-op, not a duplicate.
+- **`commit()` never renders** — call sites keep their own fine-grained
+  `renderX()` calls, because a full render would rebuild the input mid-type.
+- **Per-keystroke squashing:** consecutive absolute-value ops on one target
+  (renames, buffer, headcount, portion, pantry qty, SKU, day selection,
+  pantry toggle) replace the previous pending entry.
+- **Close-out decomposes into primitives** (`set_pantry` with the absolute
+  approved quantity + `uncheck_item`, one batch, source `closeout`) — the
+  drafts hold numbers the caterer approved in the preview, and a compound op
+  would re-run the math on replay and could produce figures nobody saw.
+
+The full vocabulary (28 ops). The first 12 are the assistant's original set —
+its prompt in `app/api/kitchen-ai/route.ts` is unchanged and the model still
+uses only these:
+
+| op | fields |
+|---|---|
+| `set_pantry` | name, qty, unit?, pantryId?, id? (create path) |
+| `rename_pantry` | name, newName, unit?, pantryId? |
+| `remove_pantry` | name, unit?, pantryId? |
+| `set_headcount` | dayId, groupId, count |
+| `set_buffer` | dayId, buffer |
+| `set_portion` | dayId, sectionId, name, per, itemId? |
+| `set_item_groups` | dayId, sectionId, name, groupIds, itemId? (empty array = nobody) |
+| `add_menu_item` | dayId, mealId?, sectionId, name, unit, per, groupIds? (absent = everyone), id?, pantryId? |
+| `remove_menu_item` | dayId, sectionId, name, itemId? |
+| `check_item` / `uncheck_item` | name, unit |
+| `select_days` | dayIds (replaces the selection) |
+| `set_sku` | key, sku ('' deletes) |
+| `set_use_pantry` | on |
+| `clear_checked` | — |
+| `add_day` | day (complete, ids pre-minted; also selects it) |
+| `remove_day` | dayId (also scrubs `selected`) |
+| `rename_day` | dayId, name |
+| `add_group` / `remove_group` / `rename_group` | dayId, group / groupId (+cascade scrub of item groupIds) / groupId, label |
+| `add_meal` / `rename_meal` / `set_meal_times` / `remove_meal` | dayId, meal / mealId, label / mealId, times / mealId |
+| `add_section` | dayId, mealId, section |
+| `set_section_groups` | dayId, sectionId, groupIds |
+| `add_pantry` | row ({id, n, qty, unit}) |
+
+`scripts/verify-ops.mjs` (`npm run verify-ops`) exercises all of this
+headlessly against the fixture board: per-op parity, determinism (same ops on
+two clones → identical payloads), idempotent replay, the rebase rehearsal, and
+squashing. Like `verify-quantities.mjs` it injects into the page's IIFE tail —
+**both scripts require the file to end with `boot(); })();`**; change that tail
+and both regexes must change in the same commit.
+
 ## Sync
 
 `/api/kitchen-list` — GET returns the blob, PUT writes it (POST is an alias so the

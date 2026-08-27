@@ -1003,6 +1003,7 @@
     if (saving) { saveTimer = setTimeout(doSave, 400); return; }
     saving = true;
     var body = payload();
+    var sentCount = pendingOps.length; // the blob carries everything applied so far
     fetch(API, { method: 'PUT', headers: authHeaders({ 'Content-Type': 'application/json' }), body: '{"state":' + body + '}' })
       .then(function (r) {
         saving = false;
@@ -1014,12 +1015,66 @@
         }
         if (!r.ok) throw new Error('HTTP ' + r.status);
         lastServerJson = body;
+        pendingOps = pendingOps.slice(sentCount); persistPending(); // drain what the blob covered
         if (body === payload()) { dirty = false; setStatus('ok', 'Saved — everyone sees this board'); }
       })
       .catch(function () {
         saving = false;
         setStatus('err', 'Offline — changes are kept on this device and will save when you reconnect');
       });
+  }
+
+  // ---------- ops: the single write primitive ----------
+  // Every board edit — a tapped checkbox, a typed rename, an AI proposal, a
+  // close-out — is an operation resolved and applied by aiResolve() via
+  // commit(). Phase A keeps the wire whole-blob; the pending queue is the
+  // groundwork for rev+rebase sync (and, mirrored to localStorage, crash
+  // safety today).
+  var PENDING_LS = 'kitchen-pending-ops-' + SCOPE;
+  var pendingOps = [];
+
+  // Consecutive absolute-value ops on the same target squash to the last one,
+  // so typing a name emits one op, not one per keystroke.
+  function opSquashKey(op) {
+    switch (op.op) {
+      case 'rename_day':      return 'rename_day|' + op.dayId;
+      case 'set_buffer':      return 'set_buffer|' + op.dayId;
+      case 'set_headcount':   return 'set_headcount|' + op.dayId + '|' + op.groupId;
+      case 'rename_group':    return 'rename_group|' + op.dayId + '|' + op.groupId;
+      case 'rename_meal':     return 'rename_meal|' + op.dayId + '|' + op.mealId;
+      case 'set_meal_times':  return 'set_meal_times|' + op.dayId + '|' + op.mealId;
+      case 'set_portion':     return 'set_portion|' + (op.itemId || op.dayId + '|' + op.sectionId + '|' + nameKey(op.name));
+      case 'set_pantry':      return op.pantryId ? 'set_pantry|' + op.pantryId : null;
+      case 'rename_pantry':   return op.pantryId ? 'rename_pantry|' + op.pantryId : null;
+      case 'set_sku':         return 'set_sku|' + op.key;
+      case 'select_days':     return 'select_days';
+      case 'set_use_pantry':  return 'set_use_pantry';
+      default: return null;
+    }
+  }
+
+  function persistPending() {
+    try { localStorage.setItem(PENDING_LS, JSON.stringify(pendingOps)); } catch (e) {}
+  }
+
+  // Apply ops to the live board and queue the save. Returns how many applied.
+  // Does NOT render — call sites keep their own fine-grained renderX() calls
+  // (a full render() here would rebuild the input being typed in and drop
+  // focus). Unresolvable ops are dropped, same as the AI path has always done.
+  function commit(ops, source) {
+    if (!Array.isArray(ops)) ops = [ops];
+    var applied = 0;
+    ops.forEach(function (op) {
+      var r = aiResolve(op);
+      if (r.error) return;
+      r.apply();
+      var k = opSquashKey(op), last = pendingOps[pendingOps.length - 1];
+      if (k && last && opSquashKey(last) === k) pendingOps[pendingOps.length - 1] = op;
+      else pendingOps.push(op);
+      applied++;
+    });
+    if (applied) { persistPending(); queueSave(); }
+    return applied;
   }
 
   function adoptRemote(remote) {
@@ -1058,6 +1113,10 @@
       activeDayId = state.days[0] ? state.days[0].id : null;
       assignIds(); render();
       setStatus('ok', migrated ? 'Shared board — everyone here sees the same numbers' : 'New board');
+      // Phase A: the blob backup (LS_KEY) is still the crash-recovery path, so
+      // a stale pending queue from a killed tab is just noise — clear it.
+      // (Phase B replaces this with an op replay against the server state.)
+      pendingOps = []; persistPending();
       if (!migrated || JSON.stringify(d && d.state) !== payload()) queueSave();
     }).catch(function (err) {
       if (err === 'locked') return; // unlock re-runs boot; nothing to render yet
@@ -1240,9 +1299,11 @@
       c.textContent = dayCovers(d).toLocaleString();
       b.appendChild(c);
       b.addEventListener('click', function () {
-        var i = state.selected.indexOf(d.id);
-        if (i > -1) state.selected.splice(i, 1); else state.selected.push(d.id);
-        queueSave(); renderDayChips(); renderSubtitle(); renderShopList(); renderPantry();
+        var next = state.selected.slice();
+        var i = next.indexOf(d.id);
+        if (i > -1) next.splice(i, 1); else next.push(d.id);
+        commit({ op: 'select_days', dayIds: next }, 'ui');
+        renderDayChips(); renderSubtitle(); renderShopList(); renderPantry();
       });
       $daychips.appendChild(b);
     });
@@ -1295,9 +1356,9 @@
     check.checked = isChecked;
     check.setAttribute('aria-label', 'Got ' + agg.n);
     check.addEventListener('change', function () {
-      if (check.checked) state.checked[agg.key] = true; else delete state.checked[agg.key];
+      commit({ op: check.checked ? 'check_item' : 'uncheck_item', name: agg.n, unit: agg.unit }, 'ui');
       li.classList.toggle('checked', check.checked);
-      syncFinish(); syncCart(); queueSave();
+      syncFinish(); syncCart();
     });
 
     var main = document.createElement('div');
@@ -1327,10 +1388,8 @@
     skuIn.value = (state.skus && state.skus[agg.key]) || '';
     skuIn.setAttribute('aria-label', 'Wholesale Club item number for ' + agg.n);
     skuIn.addEventListener('change', function () {
-      if (!state.skus) state.skus = {};
-      var v = skuIn.value.trim();
-      if (v) state.skus[agg.key] = v; else delete state.skus[agg.key];
-      queueSave(); renderShopList();
+      commit({ op: 'set_sku', key: agg.key, sku: skuIn.value }, 'ui');
+      renderShopList();
     });
     skuWrap.appendChild(skuIn);
     main.appendChild(skuWrap);
@@ -1408,7 +1467,8 @@
       if (src) {
         day = JSON.parse(JSON.stringify(src));
         day.id = newId('d'); day.name = n;
-        // fresh ids, and re-point every item at the copied day's own groups
+        // fresh ids (items too — v7), and re-point every item at the copied
+        // day's own groups
         var remap = {};
         day.groups.forEach(function (g) { var old = g.id; g.id = newId('g'); remap[old] = g.id; });
         day.meals.forEach(function (m) {
@@ -1416,6 +1476,7 @@
           m.sections.forEach(function (s) {
             s.id = newId('s');
             s.items.forEach(function (it) {
+              it.id = newId('i');
               it.groupIds = (it.groupIds || []).map(function (x) { return remap[x]; }).filter(Boolean);
             });
           });
@@ -1424,10 +1485,9 @@
         day = factory().days[0];
         day.id = newId('d'); day.name = n;
       }
-      state.days.push(day);
-      state.selected.push(day.id);
+      commit({ op: 'add_day', day: day }, 'ui');
       activeDayId = day.id; activeMealId = null;
-      assignIds(); queueSave(); render();
+      assignIds(); render();
     });
     cancel.addEventListener('click', function () { form.remove(); });
     form.appendChild(name); form.appendChild(copy); form.appendChild(ok); form.appendChild(cancel);
@@ -1473,7 +1533,8 @@
     var head = document.createElement('div');
     head.className = 'dayhead';
     head.appendChild(textField('Day name', day.name, 'name', function (v) {
-      day.name = v; renderDayPick(); renderSubtitle(); renderDayChips(); queueSave();
+      commit({ op: 'rename_day', dayId: day.id, name: v }, 'ui');
+      renderDayPick(); renderSubtitle(); renderDayChips();
     }));
     var spacer = document.createElement('div');
     spacer.className = 'spacer';
@@ -1484,11 +1545,10 @@
       del.textContent = 'Delete day';
       del.addEventListener('click', function () {
         if (!confirm('Delete "' + day.name + '" and everything on it? This affects everyone using this board.')) return;
-        state.days = state.days.filter(function (d) { return d.id !== day.id; });
-        state.selected = state.selected.filter(function (id) { return id !== day.id; });
+        commit({ op: 'remove_day', dayId: day.id }, 'ui');
         activeDayId = state.days[0] ? state.days[0].id : null;
         activeMealId = null;
-        queueSave(); render();
+        render();
       });
       head.appendChild(del);
     }
@@ -1509,15 +1569,16 @@
       name.type = 'text'; name.className = 'glabel'; name.value = g.label;
       name.setAttribute('aria-label', 'Group name');
       name.addEventListener('input', function () {
-        g.label = name.value; renderMeals(); renderShopList(); queueSave();
+        commit({ op: 'rename_group', dayId: day.id, groupId: g.id, label: name.value }, 'ui');
+        renderMeals(); renderShopList();
       });
       var count = document.createElement('input');
       count.type = 'number'; count.min = '0'; count.step = '1'; count.value = g.count;
       count.setAttribute('aria-label', g.label + ' headcount');
       count.addEventListener('input', function () {
         var n = parseInt(count.value, 10);
-        g.count = isNaN(n) || n < 0 ? 0 : n;
-        renderDayChips(); renderSubtitle(); renderMeals(); renderShopList(); renderPantry(); queueSave();
+        commit({ op: 'set_headcount', dayId: day.id, groupId: g.id, count: isNaN(n) || n < 0 ? 0 : n }, 'ui');
+        renderDayChips(); renderSubtitle(); renderMeals(); renderShopList(); renderPantry();
       });
       wrap.appendChild(name); wrap.appendChild(count);
       if (day.groups.length > 1) {
@@ -1527,15 +1588,8 @@
         rm.setAttribute('aria-label', 'Remove group ' + g.label);
         rm.addEventListener('click', function () {
           if (!confirm('Remove "' + g.label + '" from ' + day.name + '? Items assigned only to them stop being bought.')) return;
-          day.groups = day.groups.filter(function (x) { return x !== g; });
-          day.meals.forEach(function (m) {
-            m.sections.forEach(function (s) {
-              s.items.forEach(function (it) {
-                it.groupIds = (it.groupIds || []).filter(function (id) { return id !== g.id; });
-              });
-            });
-          });
-          queueSave(); render();
+          commit({ op: 'remove_group', dayId: day.id, groupId: g.id }, 'ui');
+          render();
         });
         wrap.appendChild(rm);
       }
@@ -1547,13 +1601,14 @@
     addG.addEventListener('click', function () {
       var n = prompt('Who else is eating? (e.g. Crew)');
       if (!n || !n.trim()) return;
-      day.groups.push({ id: newId('g'), label: n.trim(), count: 0 });
-      queueSave(); renderDayEditor(); renderMeals();
+      commit({ op: 'add_group', dayId: day.id, group: { id: newId('g'), label: n.trim(), count: 0 } }, 'ui');
+      renderDayEditor(); renderMeals();
     });
     grouprow.appendChild(addG);
 
     var buf = numField('Buffer %', day.buffer, function (n) {
-      day.buffer = n; renderMeals(); renderShopList(); renderPantry(); queueSave();
+      commit({ op: 'set_buffer', dayId: day.id, buffer: n }, 'ui');
+      renderMeals(); renderShopList(); renderPantry();
     });
     grouprow.appendChild(buf);
 
@@ -1597,9 +1652,9 @@
       var n = prompt('Meal name (e.g. Late night)');
       if (!n || !n.trim()) return;
       var m = { id: newId('m'), label: n.trim(), times: '', sections: [{ id: newId('s'), name: 'Menu', note: '', items: [] }] };
-      day.meals.push(m);
+      commit({ op: 'add_meal', dayId: day.id, meal: m }, 'ui');
       activeMealId = m.id;
-      queueSave(); renderMeals();
+      renderMeals();
     });
     picker.appendChild(addMeal);
     $menugroups.appendChild(picker);
@@ -1612,10 +1667,11 @@
     var mh = document.createElement('div');
     mh.className = 'dayhead';
     mh.appendChild(textField('Meal', meal.label, 'name', function (v) {
-      meal.label = v; renderMeals(); renderShopList(); queueSave();
+      commit({ op: 'rename_meal', dayId: day.id, mealId: meal.id, label: v }, 'ui');
+      renderMeals(); renderShopList();
     }));
     mh.appendChild(textField('Service times', meal.times, 'times', function (v) {
-      meal.times = v; queueSave();
+      commit({ op: 'set_meal_times', dayId: day.id, mealId: meal.id, times: v }, 'ui');
     }));
     var sp = document.createElement('div');
     sp.className = 'spacer';
@@ -1626,9 +1682,9 @@
       dm.textContent = 'Delete meal';
       dm.addEventListener('click', function () {
         if (!confirm('Delete the "' + meal.label + '" meal on ' + day.name + '? Its items go with it.')) return;
-        day.meals = day.meals.filter(function (x) { return x !== meal; });
+        commit({ op: 'remove_meal', dayId: day.id, mealId: meal.id }, 'ui');
         activeMealId = day.meals[0] ? day.meals[0].id : null;
-        queueSave(); renderMeals(); renderShopList();
+        renderMeals(); renderShopList();
       });
       mh.appendChild(dm);
     }
@@ -1645,8 +1701,8 @@
     link.addEventListener('click', function () {
       var n = prompt('Course name (e.g. Extras, Mains, Sides)');
       if (!n || !n.trim()) return;
-      meal.sections.push({ id: newId('s'), name: n.trim(), note: '', items: [] });
-      queueSave(); renderMeals();
+      commit({ op: 'add_section', dayId: day.id, mealId: meal.id, section: { id: newId('s'), name: n.trim(), note: '', items: [] } }, 'ui');
+      renderMeals();
     });
     addSec.appendChild(link);
     $menugroups.appendChild(addSec);
@@ -1676,8 +1732,8 @@
         b.textContent = g.label;
         b.title = 'Assign every item in ' + sec.name + ' to ' + g.label + ' only';
         b.addEventListener('click', function () {
-          sec.items.forEach(function (it) { it.groupIds = [g.id]; });
-          queueSave(); renderMeals(); renderShopList(); renderPantry();
+          commit({ op: 'set_section_groups', dayId: day.id, sectionId: sec.id, groupIds: [g.id] }, 'ui');
+          renderMeals(); renderShopList(); renderPantry();
         });
         forWrap.appendChild(b);
       });
@@ -1685,9 +1741,8 @@
       everyone.textContent = 'everyone';
       everyone.title = 'Assign every item in ' + sec.name + ' to all groups';
       everyone.addEventListener('click', function () {
-        var all = day.groups.map(function (g) { return g.id; });
-        sec.items.forEach(function (it) { it.groupIds = all.slice(); });
-        queueSave(); renderMeals(); renderShopList(); renderPantry();
+        commit({ op: 'set_section_groups', dayId: day.id, sectionId: sec.id, groupIds: day.groups.map(function (g) { return g.id; }) }, 'ui');
+        renderMeals(); renderShopList(); renderPantry();
       });
       forWrap.appendChild(everyone);
       head.appendChild(forWrap);
@@ -1740,10 +1795,11 @@
       b.setAttribute('aria-pressed', String(on));
       b.setAttribute('aria-label', g.label);
       b.addEventListener('click', function () {
-        item.groupIds = item.groupIds || [];
-        var i = item.groupIds.indexOf(g.id);
-        if (i > -1) item.groupIds.splice(i, 1); else item.groupIds.push(g.id);
-        queueSave(); renderMeals(); renderShopList(); renderPantry();
+        var next = (item.groupIds || []).slice();
+        var i = next.indexOf(g.id);
+        if (i > -1) next.splice(i, 1); else next.push(g.id);
+        commit({ op: 'set_item_groups', dayId: day.id, sectionId: sec.id, itemId: item.id, name: item.n, groupIds: next }, 'ui');
+        renderMeals(); renderShopList(); renderPantry();
       });
       chips.appendChild(b);
     });
@@ -1772,8 +1828,8 @@
     del.textContent = '✕';
     del.setAttribute('aria-label', 'Remove ' + item.n);
     del.addEventListener('click', function () {
-      sec.items = sec.items.filter(function (x) { return x !== item; });
-      queueSave(); renderMeals(); renderShopList(); renderPantry();
+      commit({ op: 'remove_menu_item', dayId: day.id, sectionId: sec.id, itemId: item.id, name: item.n }, 'ui');
+      renderMeals(); renderShopList(); renderPantry();
     });
 
     function refresh() {
@@ -1793,8 +1849,8 @@
     }
     perIn.addEventListener('input', function () {
       var v = parseFloat(perIn.value);
-      item.per = isNaN(v) || v < 0 ? 0 : v;
-      refresh(); renderShopList(); renderPantry(); queueSave();
+      commit({ op: 'set_portion', dayId: day.id, sectionId: sec.id, itemId: item.id, name: item.n, per: isNaN(v) || v < 0 ? 0 : v }, 'ui');
+      refresh(); renderShopList(); renderPantry();
     });
     refresh();
 
@@ -1838,11 +1894,9 @@
       var p = parseFloat(per.value);
       if (!n || isNaN(p) || p < 0) { name.focus(); return; }
       var ids = boxes.filter(function (b) { return b.cb.checked; }).map(function (b) { return b.g.id; });
-      sec.items.push({ id: newId('i'), uid: uid++, n: n, unit: unit.value, per: p, groupIds: ids });
-      if (!pantryFor(n, unit.value)) {
-        state.pantry.push({ id: newId('p'), uid: uid++, n: n, qty: 0, unit: unit.value === 'oz' ? 'lb' : 'pc' });
-      }
-      queueSave(); renderMeals(); renderShopList(); renderPantry();
+      commit({ op: 'add_menu_item', dayId: day.id, mealId: meal.id, sectionId: sec.id,
+        id: newId('i'), pantryId: newId('p'), name: n, unit: unit.value, per: p, groupIds: ids }, 'ui');
+      renderMeals(); renderShopList(); renderPantry();
     });
     cancel.addEventListener('click', function () { form.remove(); link.style.display = ''; });
     form.insertBefore(per, form.firstChild);
@@ -1924,14 +1978,14 @@
     del.textContent = '✕';
     del.setAttribute('aria-label', 'Remove ' + p.n + ' from pantry');
     del.addEventListener('click', function () {
-      state.pantry = state.pantry.filter(function (x) { return x !== p; });
-      li.remove(); queueSave(); renderShopList();
+      commit({ op: 'remove_pantry', pantryId: p.id, name: p.n, unit: p.unit }, 'ui');
+      li.remove(); renderShopList();
     });
 
     qtyIn.addEventListener('input', function () {
       var v = parseFloat(qtyIn.value);
-      p.qty = isNaN(v) || v < 0 ? 0 : v;
-      renderShopList(); queueSave();
+      commit({ op: 'set_pantry', pantryId: p.id, name: p.n, unit: p.unit, qty: isNaN(v) || v < 0 ? 0 : v }, 'ui');
+      renderShopList();
     });
 
     li.appendChild(main); li.appendChild(need); li.appendChild(cell); li.appendChild(del);
@@ -1959,8 +2013,8 @@
       var n = name.value.trim();
       var q = parseFloat(qty.value);
       if (!n) { name.focus(); return; }
-      state.pantry.push({ id: newId('p'), uid: uid++, n: n, qty: isNaN(q) || q < 0 ? 0 : q, unit: unit.value });
-      queueSave(); renderPantry(); renderShopList();
+      commit({ op: 'add_pantry', row: { id: newId('p'), n: n, qty: isNaN(q) || q < 0 ? 0 : q, unit: unit.value } }, 'ui');
+      renderPantry(); renderShopList();
     });
     cancel.addEventListener('click', function () { form.remove(); link.style.display = ''; });
     form.appendChild(name); form.appendChild(qty); form.appendChild(unit);
@@ -2087,17 +2141,21 @@
   function closeCloseout() { $closeout.hidden = true; $closeout.textContent = ''; }
 
   function applyCloseout(drafts) {
+    // Decomposed into set_pantry + uncheck_item primitives — the drafts hold
+    // the absolute quantities the caterer just approved in the preview, so the
+    // ops restate exactly those numbers (a compound op would re-run the math
+    // on replay and could produce figures nobody saw).
+    var ops = [];
     drafts.forEach(function (d) {
       var entry = pantryFor(d.agg.n, d.agg.unit);
-      if (!entry) {
-        if (d.result <= 0) return;
-        entry = { id: newId('p'), uid: uid++, n: d.agg.n, qty: 0, unit: d.unit };
-        state.pantry.push(entry);
-      }
-      entry.qty = Math.round(d.result * 100) / 100;
-      delete state.checked[d.agg.key];
+      if (!entry && d.result <= 0) return;
+      var qty = Math.round(d.result * 100) / 100;
+      if (entry) ops.push({ op: 'set_pantry', pantryId: entry.id, name: d.agg.n, unit: entry.unit, qty: qty });
+      else ops.push({ op: 'set_pantry', id: newId('p'), name: d.agg.n, unit: d.unit, qty: qty });
+      ops.push({ op: 'uncheck_item', name: d.agg.n, unit: d.agg.unit });
     });
-    closeCloseout(); queueSave(); render();
+    commit(ops, 'closeout');
+    closeCloseout(); render();
     setStatus('ok', 'Pantry updated from ' + drafts.length + (drafts.length === 1 ? ' item' : ' items'));
   }
 
@@ -2203,8 +2261,8 @@
     $pantryToggle.classList.toggle('on', state.usePantry);
   }
   $pantryToggle.addEventListener('click', function () {
-    state.usePantry = !state.usePantry;
-    syncPantryToggle(); renderShopList(); renderSubtitle(); queueSave();
+    commit({ op: 'set_use_pantry', on: !state.usePantry }, 'ui');
+    syncPantryToggle(); renderShopList(); renderSubtitle();
   });
 
   $finish.addEventListener('click', function () {
@@ -2214,8 +2272,8 @@
   });
   document.getElementById('btn-print').addEventListener('click', function () { window.print(); });
   document.getElementById('btn-uncheck').addEventListener('click', function () {
-    state.checked = {};
-    queueSave(); renderShopList();
+    commit({ op: 'clear_checked' }, 'ui');
+    renderShopList();
   });
 
   // ---------- assistant ----------
@@ -2321,9 +2379,16 @@
     state.days.forEach(function (x) { if (x.id === id) d = x; });
     return d;
   }
-  function aiFindPantry(name, unit) {
+  function aiFindPantry(name, unit, pantryId) {
+    // v7: an id match wins outright (UI-built ops carry pantryId).
+    if (pantryId) {
+      var byId = null;
+      state.pantry.forEach(function (p) { if (p.id === pantryId) byId = p; });
+      if (byId) return byId;
+    }
     // Duplicate names in different units exist (two Bacon rows, lb and pc) —
-    // when the op names a unit, that match wins; name-only is the fallback.
+    // when the op names a unit, that match wins; name-only is the fallback
+    // (the model speaks names, not ids).
     var byUnit = null, byName = null;
     state.pantry.forEach(function (p) {
       if (nameKey(p.n) !== nameKey(name)) return;
@@ -2332,9 +2397,22 @@
     });
     return byUnit || byName;
   }
-  function aiFindItem(dayId, sectionId, name) {
+  function aiFindItem(dayId, sectionId, name, itemId) {
     var day = aiFindDay(dayId);
     if (!day) return null;
+    var hit = null;
+    day.meals.forEach(function (m) {
+      m.sections.forEach(function (s) {
+        s.items.forEach(function (it) {
+          // v7: id match wins anywhere in the day; (sectionId, name) is the fallback.
+          if (!hit && itemId && it.id === itemId) hit = { day: day, meal: m, sec: s, item: it };
+        });
+      });
+    });
+    if (hit || itemId) return hit || (name ? aiFindItemByName(day, sectionId, name) : null);
+    return aiFindItemByName(day, sectionId, name);
+  }
+  function aiFindItemByName(day, sectionId, name) {
     var hit = null;
     day.meals.forEach(function (m) {
       m.sections.forEach(function (s) {
@@ -2346,17 +2424,34 @@
     });
     return hit;
   }
+  function aiFindMeal(day, mealId) {
+    var m = null;
+    day.meals.forEach(function (x) { if (x.id === mealId) m = x; });
+    return m;
+  }
+  function aiFindSection(day, sectionId) {
+    var hit = null;
+    day.meals.forEach(function (m) {
+      m.sections.forEach(function (s) { if (!hit && s.id === sectionId) hit = { meal: m, sec: s }; });
+    });
+    return hit;
+  }
   function aiMenuUnit(u) { return u === 'lb' ? 'oz' : (u || 'pc'); }
   function aiShort(name) { return String(name).split(' — ')[0]; }
 
   // op -> { label, apply } for the preview, or { error } when it can't be
   // resolved against the current board (stale name, bad id, missing field).
+  // Despite the ai prefix (historical), this is THE op applier — UI edits,
+  // AI proposals, close-out and (Phase B) rebase replay all route through it
+  // via commit(). Invariants that keep replay safe: every add_* refuses an id
+  // that already exists, every remove_* errors on a missing target, and
+  // errored ops are dropped by the caller.
   function aiResolve(op) {
     var day, g, p, hit, i;
     switch (op.op) {
       case 'set_pantry':
         if (typeof op.qty !== 'number' || op.qty < 0 || !op.name) return { error: 'Bad pantry update' };
-        p = aiFindPantry(op.name, op.unit);
+        p = aiFindPantry(op.name, op.unit, op.pantryId);
         if (p) {
           return { label: 'Pantry: ' + p.n + ' — ' + fmt(p.qty || 0, 2) + ' → ' + fmt(op.qty, 2) + ' ' + p.unit,
             apply: function () { p.qty = op.qty; } };
@@ -2365,12 +2460,12 @@
         return { label: 'Pantry: add ' + op.name + ' — ' + fmt(op.qty, 2) + ' ' + unit,
           apply: function () { state.pantry.push({ id: op.id || newId('p'), uid: uid++, n: op.name, qty: op.qty, unit: unit }); } };
       case 'rename_pantry':
-        p = aiFindPantry(op.name, op.unit);
+        p = aiFindPantry(op.name, op.unit, op.pantryId);
         if (!p || !op.newName) return { error: 'No pantry row called “' + op.name + '”' };
         return { label: 'Pantry: rename “' + p.n + '” → “' + op.newName + '”',
           apply: function () { p.n = op.newName; } };
       case 'remove_pantry':
-        p = aiFindPantry(op.name, op.unit);
+        p = aiFindPantry(op.name, op.unit, op.pantryId);
         if (!p) return { error: 'No pantry row called “' + op.name + '”' };
         return { label: 'Pantry: remove ' + p.n,
           apply: function () { state.pantry = state.pantry.filter(function (x) { return x !== p; }); } };
@@ -2387,12 +2482,12 @@
         return { label: aiShort(day.name) + ': buffer ' + day.buffer + '% → ' + op.buffer + '%',
           apply: function () { day.buffer = op.buffer; } };
       case 'set_portion':
-        hit = aiFindItem(op.dayId, op.sectionId, op.name);
+        hit = aiFindItem(op.dayId, op.sectionId, op.name, op.itemId);
         if (!hit || typeof op.per !== 'number' || op.per < 0) return { error: 'Couldn’t find “' + op.name + '” to reportion' };
         return { label: hit.item.n + ' (' + aiShort(hit.day.name) + '): ' + hit.item.per + ' → ' + op.per + ' ' + hit.item.unit + '/person',
           apply: function () { hit.item.per = op.per; } };
       case 'set_item_groups':
-        hit = aiFindItem(op.dayId, op.sectionId, op.name);
+        hit = aiFindItem(op.dayId, op.sectionId, op.name, op.itemId);
         if (!hit || !Array.isArray(op.groupIds)) return { error: 'Couldn’t find “' + op.name + '” to reassign' };
         var valid = hit.day.groups.filter(function (x) { return op.groupIds.indexOf(x.id) > -1; });
         return { label: hit.item.n + ' (' + aiShort(hit.day.name) + ') → ' + (valid.length ? valid.map(function (x) { return x.label; }).join(' + ') : 'nobody'),
@@ -2406,8 +2501,11 @@
           m.sections.forEach(function (s) { if (!sec && s.id === op.sectionId) sec = s; });
         });
         if (!sec) return { error: 'Couldn’t find that course for “' + op.name + '”' };
+        if (op.id && aiFindItem(op.dayId, op.sectionId, null, op.id)) return { error: '“' + op.name + '” is already on the board' };
         var mu = aiMenuUnit(op.unit);
-        var gids = Array.isArray(op.groupIds) && op.groupIds.length
+        // absent groupIds -> everyone (the model's default); an explicit empty
+        // array means "nobody" (the UI's unchecked-all case)
+        var gids = Array.isArray(op.groupIds)
           ? day.groups.filter(function (x) { return op.groupIds.indexOf(x.id) > -1; }).map(function (x) { return x.id; })
           : day.groups.map(function (x) { return x.id; });
         return { label: 'Add ' + op.name + ' — ' + op.per + ' ' + mu + '/person → ' + sec.name + ' (' + aiShort(day.name) + ')',
@@ -2416,7 +2514,7 @@
             if (!pantryFor(op.name, mu)) state.pantry.push({ id: op.pantryId || newId('p'), uid: uid++, n: op.name, qty: 0, unit: mu === 'oz' ? 'lb' : 'pc' });
           } };
       case 'remove_menu_item':
-        hit = aiFindItem(op.dayId, op.sectionId, op.name);
+        hit = aiFindItem(op.dayId, op.sectionId, op.name, op.itemId);
         if (!hit) return { error: 'Couldn’t find “' + op.name + '” to remove' };
         return { label: 'Remove ' + hit.item.n + ' from ' + hit.sec.name + ' (' + aiShort(hit.day.name) + ')',
           apply: function () { hit.sec.items = hit.sec.items.filter(function (x) { return x !== hit.item; }); } };
@@ -2433,6 +2531,119 @@
         if (!days.length) return { error: 'Those days aren’t on the board' };
         return { label: 'Shop for: ' + days.map(function (d) { return aiShort(d.name); }).join(' + '),
           apply: function () { state.selected = days.map(function (d) { return d.id; }); } };
+
+      // ---- v7: the UI's own edits, expressed as ops (see commit()) ----
+      case 'set_sku':
+        if (typeof op.key !== 'string' || typeof op.sku !== 'string') return { error: 'Bad SKU update' };
+        return { label: (op.sku.trim() ? 'SKU ' + op.sku.trim() + ' for ' : 'Clear SKU on ') + op.key.split('|')[0],
+          apply: function () {
+            if (!state.skus) state.skus = {};
+            if (op.sku.trim()) state.skus[op.key] = op.sku.trim(); else delete state.skus[op.key];
+          } };
+      case 'set_use_pantry':
+        return { label: (op.on ? 'Subtract' : 'Ignore') + ' pantry stock on the shopping list',
+          apply: function () { state.usePantry = !!op.on; } };
+      case 'clear_checked':
+        return { label: 'Untick everything on the shopping list',
+          apply: function () { state.checked = {}; } };
+      case 'add_day':
+        if (!op.day || !op.day.id || typeof op.day.name !== 'string'
+          || !Array.isArray(op.day.groups) || !Array.isArray(op.day.meals)) return { error: 'Bad new day' };
+        if (aiFindDay(op.day.id)) return { error: '“' + op.day.name + '” is already on the board' };
+        return { label: 'Add day “' + op.day.name + '”',
+          // deep-clone so later board edits can't reach back into the op
+          // (pending ops must stay faithful snapshots for Phase B replay)
+          apply: function () { state.days.push(JSON.parse(JSON.stringify(op.day))); state.selected.push(op.day.id); } };
+      case 'remove_day':
+        day = aiFindDay(op.dayId);
+        if (!day) return { error: 'That day isn’t on the board' };
+        return { label: 'Delete day “' + day.name + '”',
+          apply: function () {
+            state.days = state.days.filter(function (d) { return d.id !== op.dayId; });
+            state.selected = state.selected.filter(function (id) { return id !== op.dayId; });
+          } };
+      case 'rename_day':
+        day = aiFindDay(op.dayId);
+        if (!day || typeof op.name !== 'string') return { error: 'Bad day rename' };
+        return { label: 'Rename day → “' + op.name + '”',
+          apply: function () { day.name = op.name; } };
+      case 'add_group':
+        day = aiFindDay(op.dayId);
+        if (!day || !op.group || !op.group.id || typeof op.group.label !== 'string') return { error: 'Bad new group' };
+        for (i = 0; i < day.groups.length; i++) if (day.groups[i].id === op.group.id) return { error: 'That group already exists' };
+        return { label: aiShort(day.name) + ': add group “' + op.group.label + '”',
+          apply: function () { day.groups.push({ id: op.group.id, label: op.group.label, count: op.group.count || 0 }); } };
+      case 'remove_group':
+        day = aiFindDay(op.dayId);
+        g = null;
+        if (day) day.groups.forEach(function (x) { if (x.id === op.groupId) g = x; });
+        if (!day || !g) return { error: 'That group isn’t on the board' };
+        return { label: aiShort(day.name) + ': remove group “' + g.label + '”',
+          apply: function () {
+            day.groups = day.groups.filter(function (x) { return x.id !== op.groupId; });
+            // items assigned only to this group stop being bought — same cascade
+            // as the UI's remove button
+            day.meals.forEach(function (m) {
+              m.sections.forEach(function (s) {
+                s.items.forEach(function (it) {
+                  it.groupIds = (it.groupIds || []).filter(function (id) { return id !== op.groupId; });
+                });
+              });
+            });
+          } };
+      case 'rename_group':
+        day = aiFindDay(op.dayId);
+        g = null;
+        if (day) day.groups.forEach(function (x) { if (x.id === op.groupId) g = x; });
+        if (!day || !g || typeof op.label !== 'string') return { error: 'Bad group rename' };
+        return { label: aiShort(day.name) + ': rename group → “' + op.label + '”',
+          apply: function () { g.label = op.label; } };
+      case 'add_meal':
+        day = aiFindDay(op.dayId);
+        if (!day || !op.meal || !op.meal.id || typeof op.meal.label !== 'string'
+          || !Array.isArray(op.meal.sections)) return { error: 'Bad new meal' };
+        if (aiFindMeal(day, op.meal.id)) return { error: 'That meal already exists' };
+        return { label: aiShort(day.name) + ': add meal “' + op.meal.label + '”',
+          apply: function () { day.meals.push(JSON.parse(JSON.stringify(op.meal))); } };
+      case 'rename_meal':
+        day = aiFindDay(op.dayId);
+        var meal = day && aiFindMeal(day, op.mealId);
+        if (!meal || typeof op.label !== 'string') return { error: 'Bad meal rename' };
+        return { label: aiShort(day.name) + ': rename meal → “' + op.label + '”',
+          apply: function () { meal.label = op.label; } };
+      case 'set_meal_times':
+        day = aiFindDay(op.dayId);
+        var tm = day && aiFindMeal(day, op.mealId);
+        if (!tm || typeof op.times !== 'string') return { error: 'Bad service times' };
+        return { label: aiShort(day.name) + ': ' + tm.label + ' times → “' + op.times + '”',
+          apply: function () { tm.times = op.times; } };
+      case 'remove_meal':
+        day = aiFindDay(op.dayId);
+        var rm = day && aiFindMeal(day, op.mealId);
+        if (!rm) return { error: 'That meal isn’t on the board' };
+        return { label: aiShort(day.name) + ': delete meal “' + rm.label + '” and its items',
+          apply: function () { day.meals = day.meals.filter(function (x) { return x.id !== op.mealId; }); } };
+      case 'add_section':
+        day = aiFindDay(op.dayId);
+        var am = day && aiFindMeal(day, op.mealId);
+        if (!am || !op.section || !op.section.id || typeof op.section.name !== 'string') return { error: 'Bad new course' };
+        if (aiFindSection(day, op.section.id)) return { error: 'That course already exists' };
+        return { label: aiShort(day.name) + ': add course “' + op.section.name + '” to ' + am.label,
+          apply: function () { am.sections.push({ id: op.section.id, name: op.section.name, note: op.section.note || '', items: op.section.items || [] }); } };
+      case 'set_section_groups':
+        day = aiFindDay(op.dayId);
+        var sh = day && aiFindSection(day, op.sectionId);
+        if (!sh || !Array.isArray(op.groupIds)) return { error: 'Bad course assignment' };
+        var sg = day.groups.filter(function (x) { return op.groupIds.indexOf(x.id) > -1; }).map(function (x) { return x.id; });
+        return { label: 'All of ' + sh.sec.name + ' (' + aiShort(day.name) + ') → '
+            + (sg.length === day.groups.length ? 'everyone' : sg.length ? day.groups.filter(function (x) { return sg.indexOf(x.id) > -1; }).map(function (x) { return x.label; }).join(' + ') : 'nobody'),
+          apply: function () { sh.sec.items.forEach(function (it) { it.groupIds = sg.slice(); }); } };
+      case 'add_pantry':
+        if (!op.row || !op.row.id || !op.row.n || typeof op.row.qty !== 'number') return { error: 'Bad pantry row' };
+        for (i = 0; i < state.pantry.length; i++) if (state.pantry[i].id === op.row.id) return { error: 'That pantry row already exists' };
+        return { label: 'Pantry: add ' + op.row.n + ' — ' + fmt(op.row.qty, 2) + ' ' + (op.row.unit === 'pc' ? 'pc' : 'lb'),
+          apply: function () { state.pantry.push({ id: op.row.id, uid: uid++, n: op.row.n, qty: op.row.qty, unit: op.row.unit === 'pc' ? 'pc' : 'lb' }); } };
+
       default:
         return { error: 'Unknown change (' + op.op + ')' };
     }
@@ -2476,12 +2687,12 @@
       apply.textContent = ok.length ? 'Apply' + (ok.length > 1 ? ' all ' + ok.length : '') : 'Nothing to apply';
       apply.disabled = !ok.length;
       apply.addEventListener('click', function () {
-        // re-resolve at tap time — the board may have changed since preview
-        var fresh = aiPendingOps.map(aiResolve).filter(function (r) { return !r.error; });
-        fresh.forEach(function (r) { r.apply(); });
+        // commit() re-resolves at tap time — the board may have changed since
+        // preview — and drops any op that no longer resolves
+        var n = commit(aiPendingOps, 'ai');
         aiPendingOps = null;
-        aiHistory.push({ role: 'sys-ok', content: 'Applied ' + fresh.length + (fresh.length === 1 ? ' change.' : ' changes.') });
-        queueSave(); render(); aiRender();
+        aiHistory.push({ role: 'sys-ok', content: 'Applied ' + n + (n === 1 ? ' change.' : ' changes.') });
+        render(); aiRender();
       });
       var discard = document.createElement('button');
       discard.className = 'btn-ghost btn-sm';
