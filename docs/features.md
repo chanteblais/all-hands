@@ -1,7 +1,9 @@
 # Features
 
 What the product does today. One surface: the kitchen board
-(`/kitchen.html`; `/` redirects there). Full mechanics in `kitchen-board.md`.
+(`/kitchen`; `/` and the old `/kitchen.html` redirect there — the file is
+still `public/kitchen.html`, only the URL is clean). Full mechanics in
+`kitchen-board.md`.
 
 ## The board
 
