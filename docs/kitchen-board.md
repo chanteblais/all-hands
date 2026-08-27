@@ -37,19 +37,19 @@ account and is standing in a warehouse aisle on his phone**:
 
 ## Data
 
-One `page_content` row, key `catering_kitchen_state` (v6):
+One `page_content` row, key `catering_kitchen_state` (v7):
 
 ```
-{ version: 6, usePantry, selected: [dayId],
+{ version: 7, usePantry, selected: [dayId],
   checked: { "<name>|w|c": true },
   skus:    { "<name>|w|c": "item #" },   // v6 — standing Wholesale Club SKU book
   days: [{ id, name, buffer,
            groups: [{ id, label, count }],          // who is on site, and how many
            meals:  [{ id, label, times,             // Brunch / Dinner / ...
                       sections: [{ id, name, note,
-                                   items: [{ n, unit, per, pack, note,
+                                   items: [{ id, n, unit, per, pack, note,   // id — v7
                                              groupIds: [gid] }] }] }] }],
-  pantry: [{ n, qty, unit }] }
+  pantry: [{ id, n, qty, unit }] }               // id — v7
 ```
 
 **A day is meals; an item names who eats it.** The day carries the groups on site
@@ -82,7 +82,18 @@ map, nothing else touched) and was verified quantity-identical against the
 2026-08-26 live state: both page versions run headlessly over the same snapshot
 produced the same 49 shopping rows (totals, remainders and day-parts, hash
 `83f5a7c8`). *(The shelved `feat/kitchen-prices` branch also calls its shape "v6";
-reviving it now means renumbering to v7 — the branches live in the camp repo.)*
+reviving it now means renumbering past v7 — the branches live in the camp repo.)*
+
+v7 (2026-08-27) mints **stable persisted ids** on menu items (`it.id`) and pantry
+rows (`p.id`) so operations can address rows by identity instead of
+`(dayId, sectionId, name)` / `(name, unit)`. `v6toV7` is purely additive (ids
+only, nothing else touched) and was verified quantity-identical against the
+2026-08-26 fixture board: both page versions produced the same 49 shopping rows,
+hash `48a94fbe`. The runtime `uid` stays (write-only, used for label wiring);
+`id` is the addressing field and — unlike `uid` — survives `payload()`. Two
+devices migrating the same board concurrently mint divergent ids; the last saved
+blob wins and every device converges on the next poll (ids are identity, not
+meaning, so nothing is lost).
 
 v4 → v5 (`v4toV5`) merges the per-group menus back into one set of sections,
 recording which groups each item came from; identical name+unit+**per** across menus

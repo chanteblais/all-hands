@@ -767,7 +767,7 @@
     var v = { id: newId('g'), label: 'Volunteers', count: 0 };
     var pa = { id: newId('g'), label: 'Production artists', count: 0 };
     return {
-      version: 6, usePantry: false, pantry: [], checked: {}, selected: [], skus: {},
+      version: 7, usePantry: false, pantry: [], checked: {}, selected: [], skus: {},
       days: [{
         id: newId('d'), name: 'Day one', buffer: 10,
         groups: [v, pa],
@@ -789,11 +789,11 @@
         if (!m.id) m.id = newId('m');
         m.sections.forEach(function (s) {
           if (!s.id) s.id = newId('s');
-          s.items.forEach(function (it) { it.uid = uid++; });
+          s.items.forEach(function (it) { it.uid = uid++; if (!it.id) it.id = newId('i'); });
         });
       });
     });
-    state.pantry.forEach(function (p) { p.uid = uid++; });
+    state.pantry.forEach(function (p) { p.uid = uid++; if (!p.id) p.id = newId('p'); });
   }
 
   // ---------- migration ----------
@@ -893,6 +893,22 @@
     return s;
   }
 
+  // v6 -> v7: stable persisted ids on menu items (it.id) and pantry rows (p.id),
+  // so ops can address them instead of (dayId, sectionId, name) / (name, unit).
+  // Purely additive — no quantity, portion or assignment is touched.
+  function v6toV7(s) {
+    s.days.forEach(function (d) {
+      d.meals.forEach(function (m) {
+        m.sections.forEach(function (sec) {
+          sec.items.forEach(function (it) { if (!it.id) it.id = newId('i'); });
+        });
+      });
+    });
+    s.pantry.forEach(function (p) { if (!p.id) p.id = newId('p'); });
+    s.version = 7;
+    return s;
+  }
+
   function migrate(s) {
     if (!s || typeof s !== 'object') return null;
     if (!Array.isArray(s.pantry)) s.pantry = [];
@@ -906,7 +922,7 @@
         delete d.groups; delete d.v; delete d.pa;
       });
       if (s.days.some(function (d) { return Array.isArray(d.menus); })) v4toV5(s);
-      v5toV6(s); // EXIT 1 of 2 — pins the version; keep both exits in step
+      v6toV7(v5toV6(s)); // EXIT 1 of 2 — pins the version; keep both exits in step
       if (!Array.isArray(s.selected) || !s.selected.length) s.selected = s.days.length ? [s.days[0].id] : [];
       return s;
     }
@@ -930,7 +946,7 @@
           menus: splitByAudience(s.groups, s.v || 0, s.pa || 0)
         }]
       };
-      return v5toV6(v4toV5(wrapped)); // EXIT 2 of 2 — v1/v2 builds a fresh object
+      return v6toV7(v5toV6(v4toV5(wrapped))); // EXIT 2 of 2 — v1/v2 builds a fresh object
     }
     return null;
   }
@@ -947,14 +963,16 @@
 
   function payload() {
     return JSON.stringify({
-      version: 6,
+      version: 7,
       usePantry: state.usePantry,
       checked: state.checked,
       selected: state.selected,
       skus: state.skus || {}, // v6 — payload() lists fields EXPLICITLY; omitting this
                               // silently drops every SKU on every save
 
-      pantry: state.pantry.map(function (p) { return { n: p.n, qty: p.qty, unit: p.unit }; }),
+      // v7 — `id` on pantry rows and menu items is how ops address them; omitting
+      // either regresses v7 to name-addressing and re-mints ids on every device.
+      pantry: state.pantry.map(function (p) { return { id: p.id, n: p.n, qty: p.qty, unit: p.unit }; }),
       days: state.days.map(function (d) {
         return {
           id: d.id, name: d.name, buffer: d.buffer,
@@ -962,7 +980,7 @@
           meals: d.meals.map(function (m) {
             return { id: m.id, label: m.label, times: m.times, sections: m.sections.map(function (s) {
               return { id: s.id, name: s.name, note: s.note, items: s.items.map(function (it) {
-                return { n: it.n, unit: it.unit, per: it.per, pack: it.pack, note: it.note, groupIds: it.groupIds };
+                return { id: it.id, n: it.n, unit: it.unit, per: it.per, pack: it.pack, note: it.note, groupIds: it.groupIds };
               }) };
             }) };
           })
@@ -1820,9 +1838,9 @@
       var p = parseFloat(per.value);
       if (!n || isNaN(p) || p < 0) { name.focus(); return; }
       var ids = boxes.filter(function (b) { return b.cb.checked; }).map(function (b) { return b.g.id; });
-      sec.items.push({ uid: uid++, n: n, unit: unit.value, per: p, groupIds: ids });
+      sec.items.push({ id: newId('i'), uid: uid++, n: n, unit: unit.value, per: p, groupIds: ids });
       if (!pantryFor(n, unit.value)) {
-        state.pantry.push({ uid: uid++, n: n, qty: 0, unit: unit.value === 'oz' ? 'lb' : 'pc' });
+        state.pantry.push({ id: newId('p'), uid: uid++, n: n, qty: 0, unit: unit.value === 'oz' ? 'lb' : 'pc' });
       }
       queueSave(); renderMeals(); renderShopList(); renderPantry();
     });
@@ -1941,7 +1959,7 @@
       var n = name.value.trim();
       var q = parseFloat(qty.value);
       if (!n) { name.focus(); return; }
-      state.pantry.push({ uid: uid++, n: n, qty: isNaN(q) || q < 0 ? 0 : q, unit: unit.value });
+      state.pantry.push({ id: newId('p'), uid: uid++, n: n, qty: isNaN(q) || q < 0 ? 0 : q, unit: unit.value });
       queueSave(); renderPantry(); renderShopList();
     });
     cancel.addEventListener('click', function () { form.remove(); link.style.display = ''; });
@@ -2073,7 +2091,7 @@
       var entry = pantryFor(d.agg.n, d.agg.unit);
       if (!entry) {
         if (d.result <= 0) return;
-        entry = { uid: uid++, n: d.agg.n, qty: 0, unit: d.unit };
+        entry = { id: newId('p'), uid: uid++, n: d.agg.n, qty: 0, unit: d.unit };
         state.pantry.push(entry);
       }
       entry.qty = Math.round(d.result * 100) / 100;
@@ -2345,7 +2363,7 @@
         }
         var unit = op.unit === 'lb' || op.unit === 'pc' ? op.unit : (op.unit === 'oz' ? 'lb' : 'pc');
         return { label: 'Pantry: add ' + op.name + ' — ' + fmt(op.qty, 2) + ' ' + unit,
-          apply: function () { state.pantry.push({ uid: uid++, n: op.name, qty: op.qty, unit: unit }); } };
+          apply: function () { state.pantry.push({ id: op.id || newId('p'), uid: uid++, n: op.name, qty: op.qty, unit: unit }); } };
       case 'rename_pantry':
         p = aiFindPantry(op.name, op.unit);
         if (!p || !op.newName) return { error: 'No pantry row called “' + op.name + '”' };
@@ -2394,8 +2412,8 @@
           : day.groups.map(function (x) { return x.id; });
         return { label: 'Add ' + op.name + ' — ' + op.per + ' ' + mu + '/person → ' + sec.name + ' (' + aiShort(day.name) + ')',
           apply: function () {
-            sec.items.push({ uid: uid++, n: op.name, unit: mu, per: op.per, groupIds: gids });
-            if (!pantryFor(op.name, mu)) state.pantry.push({ uid: uid++, n: op.name, qty: 0, unit: mu === 'oz' ? 'lb' : 'pc' });
+            sec.items.push({ id: op.id || newId('i'), uid: uid++, n: op.name, unit: mu, per: op.per, groupIds: gids });
+            if (!pantryFor(op.name, mu)) state.pantry.push({ id: op.pantryId || newId('p'), uid: uid++, n: op.name, qty: 0, unit: mu === 'oz' ? 'lb' : 'pc' });
           } };
       case 'remove_menu_item':
         hit = aiFindItem(op.dayId, op.sectionId, op.name);
