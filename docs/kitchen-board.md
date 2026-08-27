@@ -37,20 +37,30 @@ account and is standing in a warehouse aisle on his phone**:
 
 ## Data
 
-One `page_content` row, key `catering_kitchen_state` (v7):
+One `page_content` row, key `catering_kitchen_state` (v8):
 
 ```
-{ version: 7, usePantry, selected: [dayId],
-  checked: { "<name>|w|c": true },
-  skus:    { "<name>|w|c": "item #" },   // v6 — standing Wholesale Club SKU book
+{ version: 8, usePantry, selected: [dayId],
+  ingredients: [{ id, name, aliases: [], unitClass: 'w'|'c' }],  // v8 — identity layer
+  checked: { "<ingredientId>": true },
+  skus:    { "<ingredientId>": "item #" },   // v6 — standing Wholesale Club SKU book
   days: [{ id, name, buffer,
            groups: [{ id, label, count }],          // who is on site, and how many
            meals:  [{ id, label, times,             // Brunch / Dinner / ...
                       sections: [{ id, name, note,
-                                   items: [{ id, n, unit, per, pack, note,   // id — v7
+                                   items: [{ id, ingredientId, n, unit, per, pack, note,
                                              groupIds: [gid] }] }] }] }],
-  pantry: [{ id, n, qty, unit }] }               // id — v7
+  pantry: [{ id, ingredientId, n, qty, unit }] }
 ```
+
+**Ingredients are the identity layer (v8).** Every menu item and pantry row
+points at one; aggregation, check-offs, SKUs and pantry↔menu matching all key
+on `ingredientId`, so a rename or merge updates every surface at once — the
+string-matching era's silent link-severing is impossible by construction.
+`name` is the canonical display casing; `aliases` (lowercased) are the other
+names the kitchen uses, resolved in dictation and at creation. `n` on items
+and pantry rows is a denormalized copy of the ingredient name, kept in step by
+the rename write-through.
 
 **A day is meals; an item names who eats it.** The day carries the groups on site
 (`groups`, each with a headcount) and the meals served (`meals` → `sections` →
@@ -94,6 +104,21 @@ hash `48a94fbe`. The runtime `uid` stays (write-only, used for label wiring);
 devices migrating the same board concurrently mint divergent ids; the last saved
 blob wins and every device converges on the next poll (ids are identity, not
 meaning, so nothing is lost).
+
+v8 (2026-08-27) adds **ingredient entities**. `v7toV8` mints one ingredient per
+distinct legacy name+unit-class, and the minted id IS the legacy `itemKey`
+string (`"black beans|w"` — ids are opaque, so this is legal). That single
+choice means `checked`/`skus` keys needed no re-keying, and `aggregate()` row
+keys stayed byte-identical — **verify-quantities passed unchanged** (49 rows,
+hash `48a94fbe` on both the v7 and v8 pages); the pass is the proof. Pantry rows
+join their menu ingredient by the old compatibility rule (`lb→w`, `pc→c`);
+unmatched rows mint their own. Post-v8 ingredients use `newId('n')` ids. The
+migration also **drops orphaned `checked`/`skus` keys** (no surviving ingredient
+= a row that no longer exists anywhere; they were unreadable dead weight under
+v7 too), and pins the previously nondeterministic first-write-wins display
+casing at migration time. `assignIds()` heals blobs stripped by a stale pre-v8
+page: resolve-first (aliases included), then legacy-mint, so surviving
+legacy-keyed check-offs and SKUs re-attach.
 
 v4 → v5 (`v4toV5`) merges the per-group menus back into one set of sections,
 recording which groups each item came from; identical name+unit+**per** across menus
@@ -163,6 +188,14 @@ Rules the applier enforces, because replay safety depends on them:
   approved quantity + `uncheck_item`, one batch, source `closeout`) — the
   drafts hold numbers the caterer approved in the preview, and a compound op
   would re-run the math on replay and could produce figures nobody saw.
+- **v8 changes to existing ops:** `check_item`/`uncheck_item` resolve through
+  the ingredient (aliases work in dictation) and **error on an unknown name**
+  instead of writing an orphan key — the garbage collection `checked` never
+  had. `rename_pantry` renames the row's *ingredient* everywhere and keeps the
+  old name as an alias (its old silent link-severing is impossible now).
+  `set_sku`'s key is an ingredientId. `aiFindPantry` routes through the same
+  resolver as the shopping list — the units-ignoring name scan that could land
+  on the wrong Bacon row is gone.
 
 The full vocabulary (28 ops). The first 12 are the assistant's original set —
 its prompt in `app/api/kitchen-ai/route.ts` is unchanged and the model still
@@ -191,7 +224,10 @@ uses only these:
 | `add_meal` / `rename_meal` / `set_meal_times` / `remove_meal` | dayId, meal / mealId, label / mealId, times / mealId |
 | `add_section` | dayId, mealId, section |
 | `set_section_groups` | dayId, sectionId, groupIds |
-| `add_pantry` | row ({id, n, qty, unit}) |
+| `add_pantry` | row ({id, n, qty, unit}), ingredientId? |
+| `rename_ingredient` (v8) | ingredientId, name — write-through to every surface; refuses a name owned by another in-class ingredient |
+| `merge_ingredients` (v8) | fromId, intoId — same unitClass only; absorbs names as aliases, re-points rows, sums pantry stock, moves check-off + SKU; refuses replay |
+| `add_alias` (v8) | ingredientId, alias — idempotent; a name owned elsewhere is a merge, not an alias |
 
 `scripts/verify-ops.mjs` (`npm run verify-ops`) exercises all of this
 headlessly against the fixture board: per-op parity, determinism (same ops on
