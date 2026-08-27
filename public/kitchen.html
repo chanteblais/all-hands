@@ -797,6 +797,20 @@
     }
     return hit;
   }
+  // A rename is a write-through: the canonical name changes on the ingredient
+  // and on every menu item and pantry row that points at it — no surface can
+  // fall out of step, which is the whole reason ingredients exist.
+  function renameIngredientEverywhere(ing, name) {
+    ing.name = String(name).trim();
+    state.days.forEach(function (d) {
+      d.meals.forEach(function (m) {
+        m.sections.forEach(function (s) {
+          s.items.forEach(function (it) { if (it.ingredientId === ing.id) it.n = ing.name; });
+        });
+      });
+    });
+    state.pantry.forEach(function (p) { if (p.ingredientId === ing.id) p.n = ing.name; });
+  }
   // Creation-site resolver: link to an existing ingredient (aliases included)
   // or mint a fresh one. The chosen id is written back onto the op, so the
   // queued op object replays deterministically after a rebase or crash.
@@ -1221,6 +1235,7 @@
       case 'set_pantry':      return op.pantryId ? 'set_pantry|' + op.pantryId : null;
       case 'rename_pantry':   return op.pantryId ? 'rename_pantry|' + op.pantryId : null;
       case 'set_sku':         return 'set_sku|' + op.key;
+      case 'rename_ingredient': return 'rename_ingredient|' + op.ingredientId;
       case 'select_days':     return 'select_days';
       case 'set_use_pantry':  return 'set_use_pantry';
       default: return null;
@@ -1543,7 +1558,7 @@
     check.checked = isChecked;
     check.setAttribute('aria-label', 'Got ' + agg.n);
     check.addEventListener('change', function () {
-      commit({ op: check.checked ? 'check_item' : 'uncheck_item', name: agg.n, unit: agg.unit }, 'ui');
+      commit({ op: check.checked ? 'check_item' : 'uncheck_item', ingredientId: agg.key, name: agg.n, unit: agg.unit }, 'ui');
       li.classList.toggle('checked', check.checked);
       syncFinish(); syncCart();
     });
@@ -2339,9 +2354,9 @@
       var entry = pantryForIng(d.agg.key);
       if (!entry && d.result <= 0) return;
       var qty = Math.round(d.result * 100) / 100;
-      if (entry) ops.push({ op: 'set_pantry', pantryId: entry.id, name: d.agg.n, unit: entry.unit, qty: qty });
-      else ops.push({ op: 'set_pantry', id: newId('p'), name: d.agg.n, unit: d.unit, qty: qty });
-      ops.push({ op: 'uncheck_item', name: d.agg.n, unit: d.agg.unit });
+      if (entry) ops.push({ op: 'set_pantry', pantryId: entry.id, ingredientId: d.agg.key, name: d.agg.n, unit: entry.unit, qty: qty });
+      else ops.push({ op: 'set_pantry', id: newId('p'), ingredientId: d.agg.key, name: d.agg.n, unit: d.unit, qty: qty });
+      ops.push({ op: 'uncheck_item', ingredientId: d.agg.key, name: d.agg.n, unit: d.agg.unit });
     });
     commit(ops, 'closeout');
     closeCloseout(); render();
@@ -2568,23 +2583,29 @@
     state.days.forEach(function (x) { if (x.id === id) d = x; });
     return d;
   }
-  function aiFindPantry(name, unit, pantryId) {
+  function aiFindPantry(name, unit, pantryId, ingredientId) {
     // v7: an id match wins outright (UI-built ops carry pantryId).
     if (pantryId) {
       var byId = null;
       state.pantry.forEach(function (p) { if (p.id === pantryId) byId = p; });
       if (byId) return byId;
     }
-    // Duplicate names in different units exist (two Bacon rows, lb and pc) —
-    // when the op names a unit, that match wins; name-only is the fallback
-    // (the model speaks names, not ids).
-    var byUnit = null, byName = null;
-    state.pantry.forEach(function (p) {
-      if (nameKey(p.n) !== nameKey(name)) return;
-      if (!byName) byName = p;
-      if (!byUnit && unit && p.unit === (unit === 'oz' ? 'lb' : unit)) byUnit = p;
-    });
-    return byUnit || byName;
+    // v8: everything else routes through the same ingredient resolver the
+    // shopping list uses — the old units-ignoring raw name scan is gone, so
+    // this can no longer land on a row pantryForIng() would never link.
+    if (ingredientId) {
+      var byIng = pantryForIng(ingredientId);
+      if (byIng) return byIng;
+    }
+    if (!name) return null;
+    if (unit) {
+      var ing = ingredientFor(name, unitClassOf(unit));
+      return ing ? pantryForIng(ing.id) : null;
+    }
+    // name only, no unit (the model's loosest case): try weight then count —
+    // preserves the first-row tiebreak for the dual-Bacon rows.
+    var w = ingredientFor(name, 'w'), c = ingredientFor(name, 'c');
+    return (w && pantryForIng(w.id)) || (c && pantryForIng(c.id)) || null;
   }
   function aiFindItem(dayId, sectionId, name, itemId) {
     var day = aiFindDay(dayId);
@@ -2602,12 +2623,17 @@
     return aiFindItemByName(day, sectionId, name);
   }
   function aiFindItemByName(day, sectionId, name) {
+    // v8: resolve the name to an ingredient first (aliases work in dictation);
+    // exact nameKey match on the row stays as the last resort.
+    var w = ingredientFor(name, 'w'), c = ingredientFor(name, 'c');
     var hit = null;
     day.meals.forEach(function (m) {
       m.sections.forEach(function (s) {
         if (s.id !== sectionId) return;
         s.items.forEach(function (it) {
-          if (!hit && nameKey(it.n) === nameKey(name)) hit = { day: day, meal: m, sec: s, item: it };
+          if (hit) return;
+          if ((w && it.ingredientId === w.id) || (c && it.ingredientId === c.id)
+            || nameKey(it.n) === nameKey(name)) hit = { day: day, meal: m, sec: s, item: it };
         });
       });
     });
@@ -2640,7 +2666,7 @@
     switch (op.op) {
       case 'set_pantry':
         if (typeof op.qty !== 'number' || op.qty < 0 || !op.name) return { error: 'Bad pantry update' };
-        p = aiFindPantry(op.name, op.unit, op.pantryId);
+        p = aiFindPantry(op.name, op.unit, op.pantryId, op.ingredientId);
         if (p) {
           return { label: 'Pantry: ' + p.n + ' — ' + fmt(p.qty || 0, 2) + ' → ' + fmt(op.qty, 2) + ' ' + p.unit,
             apply: function () { p.qty = op.qty; } };
@@ -2652,12 +2678,22 @@
             state.pantry.push({ id: op.id || newId('p'), uid: uid++, ingredientId: ing.id, n: ing.name, qty: op.qty, unit: unit });
           } };
       case 'rename_pantry':
-        p = aiFindPantry(op.name, op.unit, op.pantryId);
-        if (!p || !op.newName) return { error: 'No pantry row called “' + op.name + '”' };
-        return { label: 'Pantry: rename “' + p.n + '” → “' + op.newName + '”',
-          apply: function () { p.n = op.newName; } };
+        // v8: renaming a pantry row renames its INGREDIENT — menu items, list
+        // rows, everything follows. The old name stays as an alias, which is
+        // this op's historical job (the model's way to link mismatched names).
+        p = aiFindPantry(op.name, op.unit, op.pantryId, op.ingredientId);
+        var rIng = p && ingredientById(p.ingredientId);
+        if (!rIng || !op.newName || !String(op.newName).trim()) return { error: 'No pantry row called “' + op.name + '”' };
+        var rClash = ingredientFor(op.newName, rIng.unitClass);
+        if (rClash && rClash.id !== rIng.id) return { error: '“' + op.newName + '” already exists — combine them instead' };
+        return { label: 'Rename “' + rIng.name + '” → “' + String(op.newName).trim() + '” everywhere',
+          apply: function () {
+            var old = nameKey(rIng.name);
+            renameIngredientEverywhere(rIng, op.newName);
+            if (!ingredientFor(old, rIng.unitClass)) rIng.aliases.push(old);
+          } };
       case 'remove_pantry':
-        p = aiFindPantry(op.name, op.unit, op.pantryId);
+        p = aiFindPantry(op.name, op.unit, op.pantryId, op.ingredientId);
         if (!p) return { error: 'No pantry row called “' + op.name + '”' };
         return { label: 'Pantry: remove ' + p.n,
           apply: function () { state.pantry = state.pantry.filter(function (x) { return x !== p; }); } };
@@ -2713,10 +2749,16 @@
           apply: function () { hit.sec.items = hit.sec.items.filter(function (x) { return x !== hit.item; }); } };
       case 'check_item':
       case 'uncheck_item':
-        if (!op.name) return { error: 'Bad check-off' };
-        var key = itemKey(op.name, aiMenuUnit(op.unit));
+        if (!op.name && !op.ingredientId) return { error: 'Bad check-off' };
+        // v8: check-offs are ingredient-keyed, and an unknown name is an error
+        // instead of a silent orphan key — the garbage collection state.checked
+        // never had.
+        var cIng = op.ingredientId ? ingredientById(op.ingredientId)
+          : ingredientFor(op.name, unitClassOf(aiMenuUnit(op.unit)));
+        if (!cIng) return { error: 'Nothing called “' + op.name + '” on the list' };
+        var key = cIng.id;
         var checking = op.op === 'check_item';
-        return { label: (checking ? 'Cross off ' : 'Restore ') + op.name,
+        return { label: (checking ? 'Cross off ' : 'Restore ') + cIng.name,
           apply: function () { if (checking) state.checked[key] = true; else delete state.checked[key]; } };
       case 'select_days':
         if (!Array.isArray(op.dayIds)) return { error: 'Bad day selection' };
@@ -2728,7 +2770,9 @@
       // ---- v7: the UI's own edits, expressed as ops (see commit()) ----
       case 'set_sku':
         if (typeof op.key !== 'string' || typeof op.sku !== 'string') return { error: 'Bad SKU update' };
-        return { label: (op.sku.trim() ? 'SKU ' + op.sku.trim() + ' for ' : 'Clear SKU on ') + op.key.split('|')[0],
+        var sIng = ingredientById(op.key);
+        if (!sIng) return { error: 'Nothing on the board for that item number' };
+        return { label: (op.sku.trim() ? 'SKU ' + op.sku.trim() + ' for ' : 'Clear SKU on ') + sIng.name,
           apply: function () {
             if (!state.skus) state.skus = {};
             if (op.sku.trim()) state.skus[op.key] = op.sku.trim(); else delete state.skus[op.key];
@@ -2840,6 +2884,66 @@
             var ing = resolveOrMintIngredient(op, op.row.n, unitClassOf(pu));
             state.pantry.push({ id: op.row.id, uid: uid++, ingredientId: ing.id, n: ing.name, qty: op.row.qty, unit: pu });
           } };
+
+      // ---- v8: ingredient identity ops ----
+      case 'rename_ingredient':
+        var nIng = ingredientById(op.ingredientId);
+        if (!nIng || typeof op.name !== 'string' || !op.name.trim()) return { error: 'Bad rename' };
+        var nClash = ingredientFor(op.name, nIng.unitClass);
+        if (nClash && nClash.id !== nIng.id) return { error: '“' + op.name.trim() + '” already exists — combine them instead' };
+        return { label: 'Rename “' + nIng.name + '” → “' + op.name.trim() + '” everywhere',
+          apply: function () { renameIngredientEverywhere(nIng, op.name); } };
+      case 'merge_ingredients':
+        var mFrom = ingredientById(op.fromId), mInto = ingredientById(op.intoId);
+        if (!mFrom || !mInto) return { error: 'Nothing to combine' }; // missing fromId = replay refusal
+        if (mFrom.id === mInto.id) return { error: 'Those are already the same item' };
+        if (mFrom.unitClass !== mInto.unitClass) return { error: 'Can’t combine a weight item with a count item (yet)' };
+        return { label: 'Combine “' + mFrom.name + '” into “' + mInto.name + '” — stock, check-offs and item # follow',
+          apply: function () {
+            // absorb names: from's canonical name and aliases keep resolving,
+            // as aliases of into (so dictation of the old name still works)
+            [nameKey(mFrom.name)].concat(mFrom.aliases || []).forEach(function (a) {
+              var owner = ingredientFor(a, mInto.unitClass);
+              if (owner && owner.id !== mFrom.id) return; // someone else's name
+              if (nameKey(mInto.name) !== a && (mInto.aliases || []).indexOf(a) === -1) mInto.aliases.push(a);
+            });
+            state.days.forEach(function (d) {
+              d.meals.forEach(function (m) {
+                m.sections.forEach(function (s) {
+                  s.items.forEach(function (it) {
+                    if (it.ingredientId === mFrom.id) { it.ingredientId = mInto.id; it.n = mInto.name; }
+                  });
+                });
+              });
+            });
+            state.pantry.forEach(function (pp) {
+              if (pp.ingredientId === mFrom.id) { pp.ingredientId = mInto.id; pp.n = mInto.name; }
+            });
+            // two pantry rows now share the ingredient — sum into the first
+            // (same unit class ⇒ same pantry unit, so the sum is well-defined)
+            var firstRow = null;
+            state.pantry = state.pantry.filter(function (pp) {
+              if (pp.ingredientId !== mInto.id) return true;
+              if (!firstRow) { firstRow = pp; return true; }
+              firstRow.qty = Math.round(((firstRow.qty || 0) + (pp.qty || 0)) * 100) / 100;
+              return false;
+            });
+            if (state.checked[mFrom.id]) state.checked[mInto.id] = true;
+            delete state.checked[mFrom.id];
+            if (state.skus) {
+              if (!state.skus[mInto.id] && state.skus[mFrom.id]) state.skus[mInto.id] = state.skus[mFrom.id];
+              delete state.skus[mFrom.id];
+            }
+            state.ingredients = state.ingredients.filter(function (x) { return x.id !== mFrom.id; });
+          } };
+      case 'add_alias':
+        var aIng = ingredientById(op.ingredientId);
+        if (!aIng || typeof op.alias !== 'string' || !op.alias.trim()) return { error: 'Bad alias' };
+        var aOwner = ingredientFor(op.alias, aIng.unitClass);
+        if (aOwner && aOwner.id === aIng.id) return { error: '“' + aIng.name + '” already answers to that' };
+        if (aOwner) return { error: '“' + op.alias.trim() + '” already means ' + aOwner.name + ' — combine them instead' };
+        return { label: '“' + aIng.name + '” will also answer to “' + op.alias.trim() + '”',
+          apply: function () { aIng.aliases.push(nameKey(op.alias)); } };
 
       default:
         return { error: 'Unknown change (' + op.op + ')' };

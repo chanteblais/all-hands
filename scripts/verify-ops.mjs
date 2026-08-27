@@ -34,7 +34,7 @@ function loadPage() {
     '\n  globalThis.__test = { migrate: migrate, aggregate: aggregate, remaining: remaining,\n' +
       '    setState: function (s) { state = s; }, getState: function () { return state; },\n' +
       '    payloadStr: function () { return payload(); }, resolve: aiResolve, commit: commit,\n' +
-      '    pending: function () { return pendingOps; }, newId: newId };\n})();',
+      '    pending: function () { return pendingOps; }, newId: newId, ingredientFor: ingredientFor };\n})();',
   )
   if (!script.includes('__test')) {
     throw new Error(pageHtml + ": injection failed — the script no longer ends with 'boot(); })();'")
@@ -200,13 +200,15 @@ check('remove_menu_item by itemId', (() => {
 
 fresh()
 check('check/uncheck/clear_checked and set_sku', (() => {
+  const ingId = item0.ingredientId
   t.commit([
     { op: 'check_item', name: item0.n, unit: item0.unit },
-    { op: 'set_sku', key: 'zz test|c', sku: ' 12345 ' },
+    { op: 'set_sku', key: ingId, sku: ' 12345 ' },
   ], 'test')
-  const checkedOn = Object.keys(S().checked).length > 0 && S().skus['zz test|c'] === '12345'
-  t.commit([{ op: 'clear_checked' }, { op: 'set_sku', key: 'zz test|c', sku: '' }], 'test')
-  return checkedOn && Object.keys(S().checked).length === 0 && !('zz test|c' in S().skus)
+  const checkedOn = S().checked[ingId] === true && S().skus[ingId] === '12345'
+  t.commit([{ op: 'clear_checked' }, { op: 'set_sku', key: ingId, sku: '' }], 'test')
+  const skuOnUnknown = t.commit({ op: 'set_sku', key: 'no-such-ing', sku: '9' }, 'test')
+  return checkedOn && Object.keys(S().checked).length === 0 && !(ingId in S().skus) && skuOnUnknown === 0
 })())
 
 fresh()
@@ -323,7 +325,119 @@ check('closeout pair: set_pantry(absolute) + uncheck_item', (() => {
   check('idempotent replay: absolute sets converge', q1 === t.payloadStr())
 }
 
-// ---- 5. squashing --------------------------------------------------------
+// ---- 5. ingredient entities (v8) -----------------------------------------
+{
+  fresh()
+  const ingId = item0.ingredientId
+  check('rename_ingredient writes through everywhere and squashes', (() => {
+    t.commit({ op: 'select_days', dayIds: [day0.id] }, 'test') // item0's day, so it aggregates
+    const before = t.pending().length
+    t.commit({ op: 'rename_ingredient', ingredientId: ingId, name: 'Zz renam' }, 'test')
+    t.commit({ op: 'rename_ingredient', ingredientId: ingId, name: 'Zz renamed' }, 'test')
+    const st = S()
+    const ing = st.ingredients.find((i) => i.id === ingId)
+    const itemFollows = findItem(st, item0.id).item.n === 'Zz renamed'
+    const pantryFollows = st.pantry.filter((p) => p.ingredientId === ingId).every((p) => p.n === 'Zz renamed')
+    const squashed = t.pending().length - before === 1
+    const aggFollows = t.aggregate().find((a) => a.key === ingId)?.n === 'Zz renamed'
+    return ing.name === 'Zz renamed' && itemFollows && pantryFollows && squashed && aggFollows
+  })())
+
+  fresh()
+  check('rename_ingredient refuses a name owned by another in-class ingredient', (() => {
+    const other = S().ingredients.find((i) => i.id !== ingId && i.unitClass === t.getState().ingredients.find((x) => x.id === ingId).unitClass)
+    return t.commit({ op: 'rename_ingredient', ingredientId: ingId, name: other.name }, 'test') === 0
+  })())
+
+  fresh()
+  check('merge_ingredients: full absorption', (() => {
+    const st = S()
+    const into = st.ingredients.find((i) => i.id === ingId)
+    const from = st.ingredients.find((i) => i.id !== ingId && i.unitClass === into.unitClass && st.pantry.some((p) => p.ingredientId === i.id))
+    const fromName = t.ingredientFor(from.name, from.unitClass).id === from.id ? from.name : null
+    const intoPantryBefore = st.pantry.filter((p) => p.ingredientId === into.id).reduce((a, p) => a + (p.qty || 0), 0)
+    const fromPantryBefore = st.pantry.filter((p) => p.ingredientId === from.id).reduce((a, p) => a + (p.qty || 0), 0)
+    t.commit([
+      { op: 'check_item', ingredientId: from.id, name: from.name },
+      { op: 'set_sku', key: from.id, sku: '777' },
+    ], 'test')
+    const n1 = t.commit({ op: 'merge_ingredients', fromId: from.id, intoId: into.id }, 'test')
+    const s2 = S()
+    const gone = !s2.ingredients.some((i) => i.id === from.id)
+    const noRowLeft = !s2.pantry.some((p) => p.ingredientId === from.id) && (() => {
+      let any = false
+      s2.days.forEach((d) => d.meals.forEach((m) => m.sections.forEach((s) => s.items.forEach((it) => { if (it.ingredientId === from.id) any = true }))))
+      return !any
+    })()
+    const qtySummed = Math.abs(s2.pantry.filter((p) => p.ingredientId === into.id).reduce((a, p) => a + (p.qty || 0), 0) - (intoPantryBefore + fromPantryBefore)) < 0.01
+    const oneRow = s2.pantry.filter((p) => p.ingredientId === into.id).length === 1
+    const checkedMoved = s2.checked[into.id] === true && !(from.id in s2.checked)
+    const skuMoved = s2.skus[into.id] === '777' && !(from.id in s2.skus)
+    const aliasWorks = fromName && t.ingredientFor(fromName, into.unitClass)?.id === into.id
+    const replayRefused = t.commit({ op: 'merge_ingredients', fromId: from.id, intoId: into.id }, 'test') === 0
+    return n1 === 1 && gone && noRowLeft && qtySummed && oneRow && checkedMoved && skuMoved && aliasWorks && replayRefused
+  })())
+
+  fresh()
+  check('merge_ingredients refuses cross-class', (() => {
+    const st = S()
+    const w = st.ingredients.find((i) => i.unitClass === 'w')
+    const c = st.ingredients.find((i) => i.unitClass === 'c')
+    return w && c && t.commit({ op: 'merge_ingredients', fromId: w.id, intoId: c.id }, 'test') === 0
+  })())
+
+  fresh()
+  check('add_alias: resolves in dictation, idempotent, conflicts refused', (() => {
+    const n1 = t.commit({ op: 'add_alias', ingredientId: ingId, alias: 'Zz Nickname' }, 'test')
+    const resolves = t.ingredientFor('zz nickname', S().ingredients.find((i) => i.id === ingId).unitClass)?.id === ingId
+    const checkViaAlias = t.commit({ op: 'check_item', name: 'Zz Nickname', unit: item0.unit }, 'test') === 1 && S().checked[ingId] === true
+    const again = t.commit({ op: 'add_alias', ingredientId: ingId, alias: 'zz nickname' }, 'test') === 0
+    const other = S().ingredients.find((i) => i.id !== ingId && i.unitClass === S().ingredients.find((x) => x.id === ingId).unitClass)
+    const conflict = t.commit({ op: 'add_alias', ingredientId: other.id, alias: 'Zz Nickname' }, 'test') === 0
+    return n1 === 1 && resolves && checkViaAlias && again && conflict
+  })())
+
+  check('check_item on an unknown name errors (no orphan keys)', (() => {
+    fresh()
+    const before = Object.keys(S().checked).length
+    const n = t.commit({ op: 'check_item', name: 'Totally Unknown Thing', unit: 'pc' }, 'test')
+    return n === 0 && Object.keys(S().checked).length === before
+  })())
+
+  check('migration idempotency: migrate(payload(migrate(v7))) is a fixpoint', (() => {
+    fresh()
+    const a = t.payloadStr()
+    t.setState(t.migrate(JSON.parse(a)))
+    return t.payloadStr() === a
+  })())
+
+  check('healing: a blob stripped by a stale pre-v8 page comes back whole', (() => {
+    fresh()
+    const a = JSON.parse(t.payloadStr())
+    const rowsA = JSON.stringify(t.aggregate())
+    const checkedA = JSON.stringify(a.checked), skusA = JSON.stringify(a.skus)
+    delete a.ingredients
+    a.days.forEach((d) => d.meals.forEach((m) => m.sections.forEach((s) => s.items.forEach((it) => { delete it.ingredientId }))))
+    a.pantry.forEach((p) => { delete p.ingredientId })
+    t.setState(t.migrate(a))
+    const healed = JSON.stringify(t.aggregate()) === rowsA
+    const b = JSON.parse(t.payloadStr())
+    return healed && JSON.stringify(b.checked) === checkedA && JSON.stringify(b.skus) === skusA
+  })())
+
+  check('fresh-row set_pantry links so remaining() sees the stock', (() => {
+    fresh()
+    S().usePantry = true
+    const agg0 = t.aggregate().find((a) => !S().pantry.some((p) => p.ingredientId === a.key && p.qty > 0))
+    if (!agg0) return true // fixture has stock everywhere — nothing to test
+    S().pantry = S().pantry.filter((p) => p.ingredientId !== agg0.key) // simulate no row at all
+    t.commit({ op: 'set_pantry', id: t.newId('p'), ingredientId: agg0.key, name: agg0.n, unit: agg0.unit === 'oz' ? 'lb' : 'pc', qty: 5 }, 'test')
+    const agg1 = t.aggregate().find((a) => a.key === agg0.key)
+    return t.remaining(agg1) < agg1.total || agg1.total === 0
+  })())
+}
+
+// ---- 6. squashing --------------------------------------------------------
 {
   fresh()
   const before = t.pending().length
