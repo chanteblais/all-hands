@@ -19,7 +19,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:3000/kitchen.html. With no env vars set, state lives in
+Open http://localhost:3000/kitchen. With no env vars set, state lives in
 `.data/` (gitignored) and the board seeds itself from a real fixture
 (`data/fixtures/board-2026-08-26.json`) — zero setup. On localhost the page
 defaults to a **scratch board** (`?scope=test`); `?scope=live` reaches the

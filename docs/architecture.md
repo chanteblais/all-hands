@@ -11,7 +11,10 @@ handlers; the camp app's upgrade is its own, bigger job.)
 ## Why the product surface is a static page
 
 `public/kitchen.html` is one self-contained HTML file — no framework, no
-build, no hydration. This was a deliberate choice in the camp app and it
+build, no hydration. It's served at **`/kitchen`** (a `next.config.js`
+rewrite; `/` and the old `/kitchen.html` redirect there, queries like
+`?scope=test` preserved) — the clean URL is presentation only, the file and
+its no-build property are untouched. This was a deliberate choice in the camp app and it
 survives the extraction on its merits:
 
 - The board is used on phones in warehouse aisles and busy kitchens: one
