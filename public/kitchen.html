@@ -235,6 +235,13 @@
   .got { width: 18px; height: 18px; accent-color: var(--gold); cursor: pointer; }
   .item-main { min-width: 0; }
   .item-name { font-weight: 600; font-size: 15px; }
+  /* menu-item rename: reads as plain text until you touch it */
+  .item-name-in {
+    font: 600 15px system-ui, sans-serif; color: var(--ink);
+    background: transparent; border: 1.5px solid transparent; border-radius: 5px;
+    padding: 2px 4px; margin-left: -6px; width: 100%; max-width: 34ch;
+  }
+  .item-name-in:hover, .item-name-in:focus { border-color: var(--line); background: var(--field); }
   .chip {
     display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: 0.07em;
     text-transform: uppercase; border-radius: 999px; padding: 1px 8px; margin-left: 6px;
@@ -281,6 +288,11 @@
     padding: 9px 2px; border-bottom: 1px dashed var(--line);
   }
   .need-ref { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .link-ing {
+    margin-left: 6px; font-size: 11px; padding: 2px 4px; max-width: 16ch;
+    background: var(--field); color: var(--muted);
+    border: 1px solid var(--line); border-radius: 4px;
+  }
   .need-ref strong { color: var(--ink); font: 700 13px Menlo, Consolas, monospace; }
   .pantry-cell { display: flex; align-items: center; gap: 5px; justify-content: flex-end; }
 
@@ -1975,9 +1987,23 @@
 
     var main = document.createElement('div');
     main.className = 'item-main';
-    var name = document.createElement('span');
-    name.className = 'item-name';
-    name.textContent = item.n;
+    // v8: the name is editable — renaming here renames the INGREDIENT, so the
+    // pantry row, shopping list, SKU and check-off all follow. That is the
+    // feature, not a side effect.
+    var name = document.createElement('input');
+    name.type = 'text';
+    name.className = 'item-name-in';
+    name.value = item.n;
+    name.setAttribute('aria-label', 'Rename ' + item.n + ' (everywhere)');
+    name.addEventListener('input', function () {
+      commit({ op: 'rename_ingredient', ingredientId: item.ingredientId, name: name.value }, 'ui');
+    });
+    name.addEventListener('change', function () {
+      // snap back if the final op didn't resolve (empty, or the name belongs
+      // to another ingredient of the same class), then let the board catch up
+      name.value = item.n;
+      renderShopList(); renderPantry();
+    });
     main.appendChild(name);
     if (item.note) {
       var nt = document.createElement('div');
@@ -2159,6 +2185,38 @@
     var needs = listNeedsFor(p);
     if (needs === null) {
       need.appendChild(document.createTextNode('not on the selected days'));
+      // v8: fix a mis-match where you see it — merge this row's ingredient
+      // into one that IS on the menu (same unit class only). The old name
+      // survives as an alias, stock and item # ride along.
+      var ownIng = ingredientById(p.ingredientId);
+      if (ownIng) {
+        var candidates = [], seen = {};
+        eachItem(selectedDays(), function (day, meal, sec, it) {
+          if (seen[it.ingredientId] || it.ingredientId === p.ingredientId) return;
+          var ing = ingredientById(it.ingredientId);
+          if (ing && ing.unitClass === ownIng.unitClass) { seen[it.ingredientId] = true; candidates.push(ing); }
+        });
+        if (candidates.length) {
+          var link = document.createElement('select');
+          link.className = 'link-ing no-print';
+          link.setAttribute('aria-label', 'Link ' + p.n + ' to a menu item');
+          var ph = document.createElement('option');
+          ph.textContent = 'link to menu item…';
+          ph.value = ''; ph.selected = true; ph.disabled = true;
+          link.appendChild(ph);
+          candidates.forEach(function (ing) {
+            var o = document.createElement('option');
+            o.value = ing.id; o.textContent = ing.name;
+            link.appendChild(o);
+          });
+          link.addEventListener('change', function () {
+            if (!link.value) return;
+            commit({ op: 'merge_ingredients', fromId: p.ingredientId, intoId: link.value }, 'ui');
+            renderPantry(); renderShopList();
+          });
+          need.appendChild(link);
+        }
+      }
     } else {
       need.appendChild(document.createTextNode('selected days need '));
       var s = document.createElement('strong');
