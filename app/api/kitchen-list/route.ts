@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getStateRaw, putStateRaw } from '@/lib/state-store'
+import { requireAccess } from '@/lib/access'
 
 // Ported from the camp app 2026-08-26, logic unchanged; storage now goes
 // through lib/state-store.ts (Supabase in prod, file fallback in dev).
 //
-// Deliberately unauthenticated FOR NOW: backs the kitchen board
-// (public/kitchen.html), used by a caterer with no account. The blast radius
-// of an abusive write is confined to these two keys, the payload is shape- and
-// size-checked, and the page is noindex + unlinked. Auth is the top open
-// thread for productization — see docs/architecture.md → Auth posture.
+// Gated by the shared kitchen key (lib/access.ts) since 2026-08-27 — this
+// was the app's only unauthenticated write endpoint before that. The other
+// containment stays: blast radius confined to two keys, shape- and
+// size-checked payload, noindex + unlinked page.
 // Allow-listed scopes only — `?scope=test` gives a scratch board (used to
 // verify changes without touching the live one). Anything else, including no
 // param, resolves to the live key; the set is closed so this can never be used
@@ -21,6 +21,9 @@ const keyFor = (req: NextRequest) => KEYS[req.nextUrl.searchParams.get('scope') 
 const MAX_BYTES = 200_000
 
 export async function GET(req: NextRequest) {
+  const denied = requireAccess(req)
+  if (denied) return denied
+
   let raw: string | null
   try {
     raw = await getStateRaw(keyFor(req))
@@ -41,6 +44,9 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
+  const denied = requireAccess(req)
+  if (denied) return denied
+
   let body: unknown
   try {
     body = await req.json()

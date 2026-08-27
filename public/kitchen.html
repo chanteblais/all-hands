@@ -534,6 +534,38 @@
   }
   .ai-row input:focus-visible { outline: 2px solid var(--purple); outline-offset: 1px; border-color: var(--accent); }
   .ai-hint { font-size: 11px; color: var(--muted); margin: 0; padding: 0 14px 10px; }
+
+  /* Kitchen-key unlock — shown whenever the server answers 401. Opaque on
+     purpose: whatever local copy rendered underneath stays out of sight
+     until the key checks out. */
+  .lock-overlay {
+    position: fixed; inset: 0; z-index: 100;
+    background-color: var(--ground);
+    background-image: radial-gradient(ellipse at center top, rgba(210, 57, 248, 0.18) 0%, rgba(93, 43, 122, 0.10) 50%, transparent 100%);
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+  }
+  .lock-overlay[hidden] { display: none; }
+  .lock-card {
+    width: min(400px, 100%); margin: 0;
+    background: var(--panel-solid); border: 1px solid rgba(200, 168, 72, 0.45);
+    border-radius: 14px; padding: 22px 20px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+  }
+  .lock-card h2 {
+    margin: 0 0 8px; font: 400 13px system-ui, sans-serif;
+    letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--gold); text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
+  }
+  .lock-card h2::before { content: '✦ '; opacity: 0.6; }
+  .lock-card p { margin: 0 0 14px; font-size: 14px; color: var(--muted); }
+  .lock-row { display: flex; gap: 8px; }
+  .lock-row input {
+    flex: 1 1 auto; min-width: 0; padding: 9px 10px;
+    border: 1.5px solid var(--line); border-radius: 5px;
+    background: var(--field); color: var(--ink); font-size: 15px;
+  }
+  .lock-row input:focus-visible { outline: 2px solid var(--purple); outline-offset: 1px; border-color: var(--accent); }
+  .lock-card p.lock-err { margin: 10px 0 0; font-size: 13px; color: var(--danger); }
 </style>
 </head>
 <body>
@@ -641,6 +673,18 @@
   </div>
 </div>
 
+<div class="lock-overlay no-print" id="lock-overlay" hidden>
+  <form class="lock-card" id="lock-form">
+    <h2>Board locked</h2>
+    <p>Enter the kitchen key to open the shared board. Ask whoever runs the kitchen if you don’t have it.</p>
+    <div class="lock-row">
+      <input type="password" id="lock-input" placeholder="Kitchen key" autocomplete="current-password" enterkeyhint="go" aria-label="Kitchen key">
+      <button class="btn-primary" type="submit">Unlock</button>
+    </div>
+    <p class="lock-err" id="lock-err" hidden></p>
+  </form>
+</div>
+
 <script>
 (function () {
   var IS_DEV = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -649,6 +693,62 @@
   var API = '/api/kitchen-list?scope=' + SCOPE;
   var LS_KEY = 'catering-kitchen-backup-' + SCOPE;
   var LB = 16, KG = 0.45359237;
+
+  // ---------- kitchen key ----------
+  // The server answers 401 until it sees the shared key (lib/access.ts). It
+  // rides on every fetch as a header, and on a cookie so the pagehide
+  // sendBeacon — which can't carry headers — stays authenticated too. Stored
+  // per device; a wrong or revoked key just brings the unlock screen back.
+  // Local dev with no KITCHEN_ACCESS_KEY set never 401s, so the screen
+  // never appears there.
+  var KEY_LS = 'kitchen-access-key';
+  var accessKey = '';
+  try { accessKey = localStorage.getItem(KEY_LS) || ''; } catch (e) {}
+  function setKeyCookie() {
+    try {
+      document.cookie = 'kitchen_key=' + encodeURIComponent(accessKey) +
+        '; path=/; max-age=31536000; SameSite=Strict' +
+        (location.protocol === 'https:' ? '; Secure' : '');
+    } catch (e) {}
+  }
+  setKeyCookie();
+  function authHeaders(h) {
+    h = h || {};
+    if (accessKey) h['x-kitchen-key'] = accessKey;
+    return h;
+  }
+
+  var $lock = document.getElementById('lock-overlay');
+  var $lockInput = document.getElementById('lock-input');
+  var $lockErr = document.getElementById('lock-err');
+  var lockRetry = null; // what to re-run once the right key is in
+  function showLock(retry) {
+    if (retry) lockRetry = retry;
+    if (!$lock.hidden) return;
+    $lock.hidden = false;
+    $lockInput.focus();
+  }
+  function lockFail(msg) { $lockErr.textContent = msg; $lockErr.hidden = false; $lockInput.select(); }
+  document.getElementById('lock-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var v = $lockInput.value.trim();
+    if (!v) return;
+    accessKey = v;
+    try { localStorage.setItem(KEY_LS, v); } catch (err) {}
+    setKeyCookie();
+    // Probe with a read before dropping the overlay, so a mistyped key gets
+    // told off here instead of surfacing as a confusing sync error later.
+    fetch(API, { cache: 'no-store', headers: authHeaders() }).then(function (r) {
+      if (r.status === 401) { lockFail('That key didn’t work — check it and try again.'); return; }
+      $lockErr.hidden = true;
+      $lock.hidden = true;
+      $lockInput.value = '';
+      var f = lockRetry; lockRetry = null;
+      if (f) f();
+    }).catch(function () {
+      lockFail('Can’t reach the server — check your connection and try again.');
+    });
+  });
 
   var state = null;
   var activeDayId = null, activeMealId = null;
@@ -885,9 +985,15 @@
     if (saving) { saveTimer = setTimeout(doSave, 400); return; }
     saving = true;
     var body = payload();
-    fetch(API, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{"state":' + body + '}' })
+    fetch(API, { method: 'PUT', headers: authHeaders({ 'Content-Type': 'application/json' }), body: '{"state":' + body + '}' })
       .then(function (r) {
         saving = false;
+        if (r.status === 401) {
+          // dirty stays true, so the retry after unlock saves what's pending
+          setStatus('err', 'Locked — enter the kitchen key to keep saving');
+          showLock(doSave);
+          return;
+        }
         if (!r.ok) throw new Error('HTTP ' + r.status);
         lastServerJson = body;
         if (body === payload()) { dirty = false; setStatus('ok', 'Saved — everyone sees this board'); }
@@ -910,16 +1016,23 @@
   }
 
   function poll() {
-    if (dirty || saving) return;
-    fetch(API, { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+    if (dirty || saving || !$lock.hidden) return;
+    fetch(API, { cache: 'no-store', headers: authHeaders() }).then(function (r) {
+      if (r.status === 401) { showLock(); return null; }
+      return r.json();
+    }).then(function (d) {
       if (!d || !d.state) return;
       var json = JSON.stringify(d.state);
       if (json !== lastServerJson && json !== payload()) { lastServerJson = json; adoptRemote(d.state); }
     }).catch(function () {});
   }
 
+  var pollStarted = false;
   function boot() {
-    fetch(API, { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+    fetch(API, { cache: 'no-store', headers: authHeaders() }).then(function (r) {
+      if (r.status === 401) { showLock(boot); throw 'locked'; }
+      return r.json();
+    }).then(function (d) {
       var m = d && d.state ? migrate(d.state) : null;
       var migrated = false;
       if (m) { state = m; lastServerJson = JSON.stringify(d.state); migrated = true; }
@@ -928,7 +1041,8 @@
       assignIds(); render();
       setStatus('ok', migrated ? 'Shared board — everyone here sees the same numbers' : 'New board');
       if (!migrated || JSON.stringify(d && d.state) !== payload()) queueSave();
-    }).catch(function () {
+    }).catch(function (err) {
+      if (err === 'locked') return; // unlock re-runs boot; nothing to render yet
       var cached = null;
       try { cached = localStorage.getItem(LS_KEY); } catch (e) {}
       var m = null;
@@ -937,7 +1051,10 @@
       activeDayId = state.days[0] ? state.days[0].id : null;
       assignIds(); render();
       setStatus('err', "Can't reach the server — showing the last copy saved on this device");
-    }).then(function () { setInterval(poll, 10000); });
+    }).then(function () {
+      // boot re-runs after an unlock — only ever one poll loop
+      if (!pollStarted) { pollStarted = true; setInterval(poll, 10000); }
+    });
   }
 
   window.addEventListener('pagehide', function () {
@@ -2373,14 +2490,17 @@
     var convo = aiHistory.filter(function (m) { return m.role === 'user' || m.role === 'assistant'; }).slice(-12);
     fetch(AI_API, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ messages: convo, state: JSON.parse(payload()) })
     }).then(function (r) {
-      return r.json().then(function (d) { return { ok: r.ok, d: d }; });
+      return r.json().then(function (d) { return { ok: r.ok, status: r.status, d: d }; });
     }).then(function (res) {
       aiBusyNow = false;
       $aiSend.disabled = false;
-      if (!res.ok || res.d.error) {
+      if (res.status === 401) {
+        aiHistory.push({ role: 'sys', content: 'The board is locked — enter the kitchen key first.' });
+        showLock();
+      } else if (!res.ok || res.d.error) {
         aiHistory.push({ role: 'sys', content: res.d && res.d.error ? res.d.error : 'Something went wrong — try again.' });
       } else {
         aiHistory.push({ role: 'assistant', content: res.d.reply || '(no reply)' });

@@ -24,7 +24,9 @@ Three deliberate departures, all for the same reason — **the user has no membe
 account and is standing in a warehouse aisle on his phone**:
 
 1. **No authentication.** Requested explicitly. The caterer is not a camp member
-   and must not hit a sign-in wall mid-shop.
+   and must not hit a sign-in wall mid-shop. *(Superseded 2026-08-27 in the
+   extracted repo: the API is now gated by a shared kitchen key — one unlock
+   per device, still no member account. See Security posture.)*
 2. **Static HTML in `public/`, not a Next route.** No Clerk, no server components,
    no build coupling. `middleware.ts`'s matcher excludes any path containing a dot
    (`/((?!_next|.*\..*).*)`), so `/kitchen.html` never enters the Clerk pipeline at
@@ -136,17 +138,29 @@ CRDT, which this does not need yet.
 
 ## Security posture
 
-`/api/kitchen-list` is the app's **only unauthenticated write endpoint**, and
-`/api/kitchen-ai` (see The assistant, above) is its only unauthenticated
-endpoint that **spends money**. Containment for kitchen-list:
+**Since 2026-08-27 both routes are gated by the shared kitchen key**
+(`lib/access.ts`, full mechanics in `docs/architecture.md` → Auth posture):
+`KITCHEN_ACCESS_KEY` in the environment; the page asks once per device (an
+unlock screen on any 401) and from then on sends the key as an
+`x-kitchen-key` header plus a `kitchen_key` cookie, the cookie being what
+keeps the pagehide `sendBeacon` flush authenticated. Production with no key
+configured fails closed (503). This retires the accepted anyone-with-the-URL
+risk that the festival posture carried.
 
-- The route **hardcodes** the `page_content` key — it cannot write any other key.
-- Shape validation (`groups` + `pantry` must be arrays) and a 200 KB cap.
+The pre-key containment stays, as defense in depth:
+
+- The route **hardcodes** the `page_content` keys — it cannot read or write any other row.
+- Shape validation (`groups`/`days` + `pantry` must be arrays) and a 200 KB cap.
 - No PII: food quantities only.
 - `noindex,nofollow` + not linked from anywhere in the app or sitemap.
+- `/api/kitchen-ai` never touches the database and is per-IP rate-limited —
+  the limiter runs **before** the key check, so it also bounds brute-forcing
+  of the key itself.
 
-The residual risk is real and accepted: anyone who learns the URL can read or
-overwrite the list. **Remove or gate this after the festival** — see Open threads.
+What the key is not: an identity system. One key = whole-board access for
+whoever holds it, and rotating `KITCHEN_ACCESS_KEY` (locking everyone out
+until they get the new one) is the entire revocation story — adequate for one
+kitchen's trusted crew, and the generalizability log carries the rest.
 
 ## The assistant (voice-friendly AI edits)
 
@@ -271,8 +285,11 @@ silently change one he has set.
   estimate anyone has; a real "actual used" column is the next honest step.
 - **Menus for the rest of the week** still have to be entered — the structure is
   there, the food isn't. Copy-a-day covers the repeat cases.
-- **Retire or gate post-festival.** Either delete the page + route, or move it
-  behind auth once the catering thread graduates into a real product surface.
+- **Retire or gate post-festival.** ~~Either delete the page + route, or move it
+  behind auth once the catering thread graduates into a real product surface.~~
+  **Gated 2026-08-27** behind the shared kitchen key (see Security posture);
+  the remaining auth thread is the identity model, tracked in
+  `docs/architecture.md` and the generalizability log.
 - **Filling a Wholesale Club cart from the shopping list** — half shipped. The **SKU book +
   cart-list export landed 2026-08-26** (v6): an "item #" field per shopping row and a
   "Cart list → clipboard" button emitting pack counts, item numbers and `/en/x/p/<SKU>`

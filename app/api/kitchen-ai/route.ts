@@ -1,16 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
+import { requireAccess } from '@/lib/access'
 
 // Ported from the camp app 2026-08-26, logic unchanged.
 //
-// Deliberately unauthenticated FOR NOW, same posture as /api/kitchen-list:
-// backs the board's assistant drawer, used by a caterer with no account.
-// Unlike kitchen-list this endpoint spends money (Claude API), so the
-// containment is stricter: it never touches the database (the page sends its
-// own state and applies the returned operations itself, behind a preview), the
-// request is size-capped, and a per-IP rate limit bounds how fast anyone who
-// finds the URL can burn credit. Auth is the top open thread for
-// productization — see docs/architecture.md → Auth posture.
+// Gated by the shared kitchen key (lib/access.ts) since 2026-08-27 — this
+// endpoint spends money (Claude API), so it was the reason the gate exists.
+// The pre-gate containment stays: it never touches the database (the page
+// sends its own state and applies the returned operations itself, behind a
+// preview), the request is size-capped, and a per-IP rate limit bounds both
+// credit burn behind the key and brute-force guessing of the key itself
+// (the limiter runs first, so failed guesses spend the same budget).
 
 export const maxDuration = 60 // thinking + a big board can take a moment
 
@@ -100,6 +100,9 @@ export async function POST(req: NextRequest) {
   if (rateLimited(ip)) {
     return NextResponse.json({ error: 'Too many requests — try again in a bit.' }, { status: 429 })
   }
+
+  const denied = requireAccess(req)
+  if (denied) return denied
 
   let body: { messages?: unknown; state?: unknown }
   try {

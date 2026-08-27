@@ -48,24 +48,36 @@ client code → `fetch('/api/...')`. Same layering as the camp app.
 
 ## API routes
 
+Both routes are gated by the shared kitchen key (below); everything else about
+them is unchanged.
+
 | Route | Methods | What it does |
 |---|---|---|
-| `/api/kitchen-list` | GET, PUT (POST = PUT for sendBeacon) | Board state read/write. Closed scope allow-list (`?scope=test` → scratch key; anything else → live key), shape validation, 200 KB cap. |
-| `/api/kitchen-ai` | POST | The assistant drawer. Claude (`claude-opus-5`, effort low — extraction-shaped chat, latency matters), prompt-cached system prompt, per-IP rate limit, size caps. **Never touches the database**: the page sends state, the model proposes ops, the page previews and the caterer applies. **Spends money** — needs `ANTHROPIC_API_KEY`. |
+| `/api/kitchen-list` | GET, PUT (POST = PUT for sendBeacon) | Board state read/write. Kitchen-key gated. Closed scope allow-list (`?scope=test` → scratch key; anything else → live key), shape validation, 200 KB cap. |
+| `/api/kitchen-ai` | POST | The assistant drawer. Kitchen-key gated. Claude (`claude-opus-5`, effort low — extraction-shaped chat, latency matters), prompt-cached system prompt, per-IP rate limit, size caps. **Never touches the database**: the page sends state, the model proposes ops, the page previews and the caterer applies. **Spends money** — needs `ANTHROPIC_API_KEY`. |
 
-## Auth posture — the top open thread
+## Auth posture — the kitchen key (since 2026-08-27)
 
-Both routes are **unauthenticated**, a carry-over from the board's life as an
-unlisted probe for a caterer with no account (risk explicitly accepted by the
-owner 2026-08-05, festival-scoped). What was a temporary posture in the camp
-app is the founding product question here: `kitchen-list` is an open write
-endpoint and `kitchen-ai` spends money for anyone who finds the URL.
+Both routes require a single shared **kitchen key** (`lib/access.ts`):
+`KITCHEN_ACCESS_KEY` in the environment, presented by the page as an
+`x-kitchen-key` header on fetches plus a `kitchen_key` cookie — the cookie is
+what keeps the pagehide `sendBeacon` flush authenticated, since beacons can't
+carry headers. A missing or wrong key gets 401 and the page shows an unlock
+screen; the key is remembered per device (`localStorage`), so the crew types
+it once. Comparison is constant-time over SHA-256 digests. With no key
+configured, local dev stays open (a fresh clone just works, same spirit as the
+file-backed store) and **production refuses with 503** — a deploy that forgot
+the env var fails closed instead of silently reverting to the old open posture.
 
-**Before All Hands gets a real audience: add auth.** The camp app's pattern (Clerk,
-`publicMetadata` roles, session-claims gating in a shared helper) is the
-default answer when the time comes; what a *caterer's crew* identity model
-looks like (owner + invited shoppers?) is a product decision that should
-precede the library choice.
+This closes the founding gap (`kitchen-list` was an open write endpoint,
+`kitchen-ai` spent money for anyone with the URL — risk accepted 2026-08-05
+while festival-scoped) at link-with-a-key strength, and that is all it does:
+one key, one role, no identities. What a *caterer's crew* identity model looks
+like (owner + invited shoppers?) is still the product decision that should
+precede a real identity system; the camp app's pattern (Clerk,
+`publicMetadata` roles, session-claims gating in a shared helper) remains the
+default answer when that time comes, and the header+cookie seam and
+401→unlock flow carry over to it.
 
 ## Sync model (unchanged from the camp app)
 
