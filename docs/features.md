@@ -60,6 +60,18 @@ replay on next open, and every applied batch lands in the `board_ops` audit
 log with a per-device actor id. Mechanics in `kitchen-board.md` → Ops and
 `architecture.md` → Sync model.
 
+### Ingredients (2026-08-27, shape v8)
+Every menu item and pantry row now points at an **ingredient record**
+({id, name, aliases, unitClass}); the list, check-offs, SKUs and pantry
+matching key on the id, not the name. What that buys in use: **rename a menu
+item in place** (tap its name on the Menus tab) and the pantry row, shopping
+list, SKU and check-off follow; an unmatched pantry row ("not on the selected
+days") offers a **link to menu item…** picker that merges it into the right
+ingredient — old name kept as an alias, stock and item # ride along; dictation
+resolves aliases, so "pasta sauce" lands on Tomato sauce after one merge.
+Cross-unit-class merging (the lb Bacon row + the pc Bacon row) is deliberately
+deferred. Mechanics in `kitchen-board.md` → Data / Ops.
+
 ### Scopes
 On localhost the page defaults to the scratch board (`?scope=test`, banner);
 `?scope=live` is explicit. Print view strips checked rows and chrome.

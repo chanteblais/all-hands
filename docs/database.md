@@ -14,7 +14,7 @@ the cutover copy of the board's row needs no translation.
 | Column | Type | Notes |
 |---|---|---|
 | `key` | text, PK | |
-| `value` | text | JSON string (the board state — see `kitchen-board.md` for the shape, currently v7) |
+| `value` | text | JSON string (the board state — see `kitchen-board.md` for the shape, currently v8: adds `ingredients` + per-row `ingredientId`; no SQL change — shape versions live in the blob) |
 | `updated_at` | timestamptz, default now() | set by the API on every write |
 | `rev` | bigint, default 0 | revision counter (002) — the checked PUT is a compare-and-swap on it; a stale `baseRev` gets 409 and the page rebases |
 
