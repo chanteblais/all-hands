@@ -10,7 +10,7 @@ writes anything itself.
 
 Extracted 2026-08-26 from the Glåüm camp app, where it ran as the "kitchen
 board" during a real festival catering engagement (four service days, ~800
-covers). `docs/` carries the full spec and history.
+covers). `docs/` carries the full spec and history. 
 
 ## Run it locally
 
