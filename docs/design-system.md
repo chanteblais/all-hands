@@ -1,52 +1,72 @@
 # Design System
 
-All Hands's design language is the board's own — it grew utilitarian-editorial in
-the field and that register is the brand: **a well-set worksheet, not an app.**
-Deliberately *not* the camp app's ceremonial ink-and-gold; All Hands stands alone.
-
-## Voice
-
-Plain kitchen language, warm but terse. Name things, don't code them ("not for
-Volunteers", never "excluded"). Empty states explain themselves and say what to
-do next. Numbers are the content — typography serves legibility of quantities
-first. The assistant replies in one or two short sentences, no markdown, and
-reads suspicious magnitudes back ("Setting black beans to 12.5 lb").
+**All Hands shares the camp app's visual language** (Chante's call, 2026-08-26,
+reversing the extraction-day "stands alone" direction): the board now reads as
+a sibling of glaum-camp-website — nocturnal ink, gold, purple, the ✦ ornament
+register — while keeping its utilitarian bones (monospace numerals, editorial
+list structure, print-first shopping list). The camp repo's
+`docs/design-system.md` is the upstream reference; this doc records how it
+lands here.
 
 ## Palette (CSS custom properties in `public/kitchen.html`)
 
-Warm paper + olive + market-stand green; automatic dark mode via
-`prefers-color-scheme` (every token has a dark twin — never define a color
-only on one side).
+One theme — the camp look is deliberately nocturnal. Print (below) is the
+light mode.
 
-| Token | Light | Dark | Use |
-|---|---|---|---|
-| `--ground` | `#F4F2EA` | `#191B16` | page background |
-| `--card` | `#FDFCF8` | `#22251E` | panels/cards |
-| `--ink` | `#23261F` | `#E8E6D9` | text |
-| `--muted` | `#6E7263` | `#9AA08D` | secondary text, hints |
-| `--line` | `#D8D5C6` | `#3A3E33` | hairlines, borders |
-| `--accent` | `#33714A` | `#7CC495` | actions, active states |
-| `--accent-ink` | `#FFFFFF` | `#14201A` | text on accent |
-| `--hl` | `rgba(244,214,76,.45)` | `rgba(244,214,76,.16)` | highlight (quantity pills) |
-| `--chip-v` / `--chip-pa` | blue / purple | lightened | group chips (seed pair; chips are data-driven) |
-| `--danger` | `#A04532` | `#D08A78` | destructive, shortfalls |
+| Token | Value | Use |
+|---|---|---|
+| `--ground` | `#1A0A24` | page ink (plus body layers: purple radial glow at top-center, plum mid-gradient, fixed gold dot-grid via `body::before`) |
+| `--card` | `rgba(255,255,255,0.04)` | panels/cards (translucent over ink) |
+| `--panel-solid` | `#251232` | opaque surfaces that overlay content (assistant drawer) |
+| `--ink` | `#F3EDE6` | body text (warm off-white) |
+| `--muted` | `rgba(243,237,230,0.55)` | secondary text, hints |
+| `--line` | `rgba(200,168,72,0.22)` | gold hairlines, field borders |
+| `--gold` / `--accent` | `#C8A848` | headings, active states, primary buttons (ink text: `--accent-ink`) |
+| `--purple` | `#D239F8` | focus rings (all `:focus-visible`), glow accents |
+| `--lavender` | `#D9B3FF` | "busy" sync dot, light accents |
+| `--hl` | `rgba(200,168,72,0.26)` | quantity pills on the shopping list |
+| `--chip-v` / `--chip-pa` | `#5D2B7A` plum / `#2F6D68` teal | group chips (seed pair; cream `--chip-ink` text) |
+| `--danger` | `#ff8a8a` (borders `--danger-line` `rgba(255,80,80,0.45)`) | destructive, shortfalls, scratch badge |
 
-## Type & layout
+`color-scheme: dark` is set so native controls (checkboxes, selects) render
+dark; print flips it to light.
 
-System font stack (`system-ui, -apple-system, "Segoe UI"`) — instant load, at
-home on every device. Masthead style: uppercase tracked eyebrow, heavy
-tight-tracked `h1` with a thick underline. Max width 900 px, single column.
-Number inputs strip spinners (they clipped right-aligned digits — half a "5"
-reads as "!").
+## Type
 
-## Rules of thumb
+| Face | Source | Use |
+|---|---|---|
+| TokyoDreams | local `/fonts/TokyoDreams*.otf` (copied from the camp repo) | the `h1` masthead |
+| Libre Baskerville | Google Fonts | body serif |
+| system-ui | — | controls, tabs, tracked micro-labels |
+| Menlo/Consolas mono | — | every numeral cell (quantities, headcounts, prices) — kitchen legibility beats purity |
 
-- **Mobile in the same pass** (~380 px): the primary context is a phone held
-  one-handed in an aisle. Static-page media queries live in the page's own
-  `<style>`.
-- **Print is a first-class view**: the shopping list prints clean — `no-print`
-  on chrome, checked rows drop off.
+Headings are gold with the camp text-shadow (`0 2px 8px rgba(0,0,0,0.8)`).
+Eyebrows/section heads: uppercase, tracked `0.14–0.26em`, gold, led by a `✦`.
+
+## Motifs
+
+- **`.gold-rule`** — hairline gold gradient with a centered ✦ (under the masthead).
+- Section heads and the assistant header carry a `✦ ` prefix; the eyebrow is
+  wrapped in ✦s.
+- Buttons are pills: primary gold-on-ink, ghost cream/gold hairline, danger
+  ghost in the red register. Focus is always the purple outline.
+- The assistant fab is a gold pill with a faint purple glow.
+
+## Print — the shopping list is a first-class printout
+
+`@media print` flips to black-on-white: tokens overridden, Georgia serif,
+TokyoDreams and every ornament (dot grid, gold rule, ✦ prefixes, shadows)
+stripped, checked rows dropped. Never let a camp-language flourish survive
+into print.
+
+## Rules of thumb (unchanged by the restyle)
+
+- **Mobile in the same pass** (~380–390 px): primary context is a phone held
+  one-handed in an aisle. The ≤620px grid-area layouts predate the restyle
+  and are proven — don't disturb them for visual polish.
 - **Previews before mutations**: anything that changes state at a distance
   (assistant ops, close-out) shows a before/after and waits for a human.
-- **Flag, don't hide**: unconfirmed data (a struck-through sheet item, an
-  unassigned item) stays visible with a label.
+- **Flag, don't hide**: unconfirmed or unassigned data stays visible, labeled.
+- **Voice**: plain kitchen language, warm but terse; the ceremonial register
+  lives in the chrome (headings, ornaments, the colophon), never in the rows
+  the caterer reads mid-shop.

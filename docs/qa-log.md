@@ -5,6 +5,25 @@ useful for the next tester — what is *known and deliberate* so it doesn't get
 re-reported, plus where the remaining risk lives. Newest sweep first.
 (Same format as the camp repo's `docs/qa-log.md`.)
 
+## Camp visual language — 2026-08-26 (`ux/camp-visual-language`)
+
+Full restyle of `public/kitchen.html` to the camp app's design language (her
+call, reversing the extraction-day "stands alone" direction) — tokens, fonts,
+background layers, ornaments; layout grids untouched. Verified:
+
+- `scripts/verify-quantities.mjs` vs the camp page over the live fixture —
+  IDENTICAL before and after (CSS/markup-only change, no state or math).
+- Browser pass on all three tabs + assistant drawer with real seeded data.
+- Mobile at 390px via an iframe harness (masthead, chips, syncbar checked;
+  two wrap bugs found and fixed: eyebrow ✦ orphan, sync-dot stranding).
+- Print CSS extended (ornaments stripped, `color-scheme` flipped) — reviewed
+  in CSS, not physically printed.
+
+**Known and deliberate:** numerals stay monospace inside the serif body;
+native controls render dark via `color-scheme: dark`; the SKU field got real
+field styling (it was unstyled/UA-white before — pre-existing, invisible on
+the old paper palette).
+
 ## Next 16 upgrade — 2026-08-26 (`chore/next-16`)
 
 `npm audit` flagged 2 high-severity trees: next@14.2.35 (21 advisories, fixed
