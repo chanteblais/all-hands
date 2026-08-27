@@ -1,0 +1,33 @@
+#!/bin/sh
+# Guards against crossed-session commits — same protection as the camp repo's
+# hook (docs/branching.md → Commit guards), motivated by two real incidents
+# there (2026-07-08 add -A sweep, 2026-07-10 crossed-cwd commit).
+#
+# Active because core.hooksPath = .githooks (set once per clone:
+#   git config core.hooksPath .githooks
+# ). Worktrees share the config and carry their own checkout of this file.
+
+# 1. Never commit .claude/ session/routine bookkeeping (launch.json excepted).
+staged_claude=$(git diff --cached --name-only --diff-filter=d | grep '^\.claude/' | grep -v '^\.claude/launch\.json$')
+if [ -n "$staged_claude" ]; then
+  echo "✗ Commit includes .claude/ session bookkeeping — almost certainly swept in by accident:" >&2
+  echo "$staged_claude" | sed 's/^/    /' >&2
+  echo "  Unstage with: git restore --staged .claude/" >&2
+  exit 1
+fi
+
+# 2. No direct commits to main (main = deployable; work happens on branches —
+#    docs/branching.md). Crossed-session tripwire: a session that thinks it's
+#    in another repo (the camp repo? glaum-ca?) lands here on main and stops
+#    loudly. Deliberate tiny tweaks: ALLHANDS_ALLOW_MAIN=1 git commit …
+#    (--no-ff merges to main use the pre-merge-commit hook path, not this one.)
+branch=$(git symbolic-ref --quiet --short HEAD)
+if [ "$branch" = "main" ] && [ -z "$ALLHANDS_ALLOW_MAIN" ]; then
+  echo "✗ Direct commit to main in all-hands blocked." >&2
+  echo "  Working on another project (glaum-camp-website? glaum-ca?) — then your cwd is crossed: this is the ALL HANDS repo." >&2
+  echo "  Meant to commit here? Use a branch (docs/branching.md), or for a deliberate tiny tweak:" >&2
+  echo "    ALLHANDS_ALLOW_MAIN=1 git commit …" >&2
+  exit 1
+fi
+
+exit 0
