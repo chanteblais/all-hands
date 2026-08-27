@@ -761,6 +761,55 @@
   function itemKey(n, unit) { return nameKey(n) + '|' + (unit === 'oz' ? 'w' : 'c'); }
   function newId(p) { return p + (uid++) + '-' + Math.random().toString(36).slice(2, 6); }
 
+  // ---------- ingredients (v8) ----------
+  // The board's identity layer: one record per real-world ingredient, with the
+  // canonical display name and any aliases the kitchen uses for it. Menu items
+  // and pantry rows point at it by ingredientId; aggregation, check-offs, SKUs
+  // and pantry matching all key on the id, so a rename or merge updates every
+  // surface at once instead of silently severing string matches.
+  function unitClassOf(u) { return (u === 'oz' || u === 'lb') ? 'w' : 'c'; }
+  function ingredientById(id) {
+    var hit = null;
+    (state.ingredients || []).forEach(function (i) { if (i.id === id) hit = i; });
+    return hit;
+  }
+  // Resolve a spoken/typed name to an ingredient of the given unit class —
+  // canonical name first, then aliases. Case-insensitive via nameKey.
+  function ingredientFor(name, cls) {
+    var k = nameKey(name), hit = null;
+    (state.ingredients || []).forEach(function (i) {
+      if (hit || i.unitClass !== cls) return;
+      if (nameKey(i.name) === k || (i.aliases || []).indexOf(k) > -1) hit = i;
+    });
+    return hit;
+  }
+  // Migration-era mint: the id IS the legacy itemKey string ("black beans|w").
+  // Ids are opaque, and this exact choice is what lets v7 checked/skus keys
+  // work unchanged as ingredient ids, and keeps aggregate() row keys
+  // byte-identical across the v7->v8 migration. Takes the state object as a
+  // parameter so migrate() can call it before the module `state` is assigned.
+  function mintLegacyIngredient(s, name, cls) {
+    var id = nameKey(name) + '|' + cls, hit = null;
+    s.ingredients.forEach(function (i) { if (i.id === id) hit = i; });
+    if (!hit) {
+      hit = { id: id, name: String(name).trim(), aliases: [], unitClass: cls };
+      s.ingredients.push(hit);
+    }
+    return hit;
+  }
+  // Creation-site resolver: link to an existing ingredient (aliases included)
+  // or mint a fresh one. The chosen id is written back onto the op, so the
+  // queued op object replays deterministically after a rebase or crash.
+  function resolveOrMintIngredient(op, name, cls) {
+    var ing = ingredientFor(name, cls);
+    if (!ing) {
+      ing = { id: op.ingredientId || newId('n'), name: String(name).trim(), aliases: [], unitClass: cls };
+      state.ingredients.push(ing);
+    }
+    op.ingredientId = ing.id;
+    return ing;
+  }
+
   // ---------- shape ----------
   // day = who is on site (groups, with headcounts) + what gets served (meals ->
   // sections -> items). Each item names the groups that get it, so one meal can
@@ -769,7 +818,7 @@
     var v = { id: newId('g'), label: 'Volunteers', count: 0 };
     var pa = { id: newId('g'), label: 'Production artists', count: 0 };
     return {
-      version: 7, usePantry: false, pantry: [], checked: {}, selected: [], skus: {},
+      version: 8, usePantry: false, pantry: [], checked: {}, selected: [], skus: {}, ingredients: [],
       days: [{
         id: newId('d'), name: 'Day one', buffer: 10,
         groups: [v, pa],
@@ -784,6 +833,7 @@
   }
 
   function assignIds() {
+    if (!Array.isArray(state.ingredients)) state.ingredients = [];
     state.days.forEach(function (d) {
       if (!d.id) d.id = newId('d');
       d.groups.forEach(function (g) { if (!g.id) g.id = newId('g'); });
@@ -791,11 +841,23 @@
         if (!m.id) m.id = newId('m');
         m.sections.forEach(function (s) {
           if (!s.id) s.id = newId('s');
-          s.items.forEach(function (it) { it.uid = uid++; if (!it.id) it.id = newId('i'); });
+          s.items.forEach(function (it) {
+            it.uid = uid++;
+            if (!it.id) it.id = newId('i');
+            // heal a blob a stale pre-v8 page stripped: resolve first (aliases
+            // included) so existing records re-link, then legacy-mint so a
+            // fully stripped blob comes back with the same deterministic ids
+            // that its surviving checked/skus keys expect
+            if (!it.ingredientId) it.ingredientId = (ingredientFor(it.n, unitClassOf(it.unit)) || mintLegacyIngredient(state, it.n, unitClassOf(it.unit))).id;
+          });
         });
       });
     });
-    state.pantry.forEach(function (p) { p.uid = uid++; if (!p.id) p.id = newId('p'); });
+    state.pantry.forEach(function (p) {
+      p.uid = uid++;
+      if (!p.id) p.id = newId('p');
+      if (!p.ingredientId) p.ingredientId = (ingredientFor(p.n, unitClassOf(p.unit)) || mintLegacyIngredient(state, p.n, unitClassOf(p.unit))).id;
+    });
   }
 
   // ---------- migration ----------
@@ -911,6 +973,39 @@
     return s;
   }
 
+  // v7 -> v8: ingredient entities. One record per distinct name+unit-class,
+  // with menu items and pantry rows pointing at it by ingredientId. Minted ids
+  // ARE the legacy itemKey strings, so existing checked/skus keys need no
+  // re-keying and aggregate() row keys stay byte-identical (the harness pass
+  // is the proof). Items mint before pantry rows, in board order, which pins
+  // today's first-write-wins display casing deterministically. Idempotent —
+  // re-running on a v8 blob (every remote adoption does) is a no-op.
+  function v7toV8(s) {
+    if (!Array.isArray(s.ingredients)) s.ingredients = [];
+    s.days.forEach(function (d) {
+      d.meals.forEach(function (m) {
+        m.sections.forEach(function (sec) {
+          sec.items.forEach(function (it) {
+            if (!it.ingredientId) it.ingredientId = mintLegacyIngredient(s, it.n, unitClassOf(it.unit)).id;
+          });
+        });
+      });
+    });
+    // lb joins the |w ingredient of the same name, pc joins |c — exactly the
+    // old pantryFor compatibility rule; an unmatched row mints its own.
+    s.pantry.forEach(function (p) {
+      if (!p.ingredientId) p.ingredientId = mintLegacyIngredient(s, p.n, unitClassOf(p.unit)).id;
+    });
+    // Orphan sweep: checked/skus keys with no ingredient belong to rows that
+    // no longer exist anywhere — unreadable under v7 too, dropped for good.
+    var ids = {};
+    s.ingredients.forEach(function (i) { ids[i.id] = true; });
+    Object.keys(s.checked).forEach(function (k) { if (!ids[k]) delete s.checked[k]; });
+    Object.keys(s.skus || {}).forEach(function (k) { if (!ids[k]) delete s.skus[k]; });
+    s.version = 8;
+    return s;
+  }
+
   function migrate(s) {
     if (!s || typeof s !== 'object') return null;
     if (!Array.isArray(s.pantry)) s.pantry = [];
@@ -924,7 +1019,7 @@
         delete d.groups; delete d.v; delete d.pa;
       });
       if (s.days.some(function (d) { return Array.isArray(d.menus); })) v4toV5(s);
-      v6toV7(v5toV6(s)); // EXIT 1 of 2 — pins the version; keep both exits in step
+      v7toV8(v6toV7(v5toV6(s))); // EXIT 1 of 2 — pins the version; keep both exits in step
       if (!Array.isArray(s.selected) || !s.selected.length) s.selected = s.days.length ? [s.days[0].id] : [];
       return s;
     }
@@ -948,7 +1043,7 @@
           menus: splitByAudience(s.groups, s.v || 0, s.pa || 0)
         }]
       };
-      return v6toV7(v5toV6(v4toV5(wrapped))); // EXIT 2 of 2 — v1/v2 builds a fresh object
+      return v7toV8(v6toV7(v5toV6(v4toV5(wrapped)))); // EXIT 2 of 2 — v1/v2 builds a fresh object
     }
     return null;
   }
@@ -965,16 +1060,25 @@
 
   function payload() {
     return JSON.stringify({
-      version: 7,
+      version: 8,
       usePantry: state.usePantry,
       checked: state.checked,
       selected: state.selected,
       skus: state.skus || {}, // v6 — payload() lists fields EXPLICITLY; omitting this
                               // silently drops every SKU on every save
 
+      // v8 — the ingredient records ARE the board's identity layer; omitting
+      // this drops every canonical name and alias and forces a re-mint on
+      // every device. Same trap as skus above.
+      ingredients: (state.ingredients || []).map(function (i) {
+        return { id: i.id, name: i.name, aliases: i.aliases || [], unitClass: i.unitClass };
+      }),
+
       // v7 — `id` on pantry rows and menu items is how ops address them; omitting
       // either regresses v7 to name-addressing and re-mints ids on every device.
-      pantry: state.pantry.map(function (p) { return { id: p.id, n: p.n, qty: p.qty, unit: p.unit }; }),
+      // v8 — same warning for `ingredientId`: omitting it regresses identity to
+      // name-matching and orphans checked/skus keys.
+      pantry: state.pantry.map(function (p) { return { id: p.id, ingredientId: p.ingredientId, n: p.n, qty: p.qty, unit: p.unit }; }),
       days: state.days.map(function (d) {
         return {
           id: d.id, name: d.name, buffer: d.buffer,
@@ -982,7 +1086,7 @@
           meals: d.meals.map(function (m) {
             return { id: m.id, label: m.label, times: m.times, sections: m.sections.map(function (s) {
               return { id: s.id, name: s.name, note: s.note, items: s.items.map(function (it) {
-                return { id: it.id, n: it.n, unit: it.unit, per: it.per, pack: it.pack, note: it.note, groupIds: it.groupIds };
+                return { id: it.id, ingredientId: it.ingredientId, n: it.n, unit: it.unit, per: it.per, pack: it.pack, note: it.note, groupIds: it.groupIds };
               }) };
             }) };
           })
@@ -1255,18 +1359,16 @@
       });
     });
   }
-  function unitsCompatible(u, pu) {
-    return (u === 'oz' && pu === 'lb') || (u === 'pc' && pu === 'pc');
-  }
-  function pantryFor(name, unit) {
+  // v8: the pantry links to menus through the shared ingredient, not by name.
+  function pantryForIng(ingredientId) {
     var found = null;
     state.pantry.forEach(function (p) {
-      if (!found && nameKey(p.n) === nameKey(name) && unitsCompatible(unit, p.unit)) found = p;
+      if (!found && p.ingredientId === ingredientId) found = p;
     });
     return found;
   }
-  function pantryNative(name, unit) {
-    var p = pantryFor(name, unit);
+  function pantryNative(ingredientId) {
+    var p = pantryForIng(ingredientId);
     if (!p) return 0;
     return p.unit === 'lb' ? (p.qty || 0) * LB : (p.qty || 0);
   }
@@ -1275,13 +1377,14 @@
     eachItem(selectedDays(), function (day, meal, sec, it) {
       var q = neededFor(day, it);
       if (q <= 0) return; // assigned to nobody, or a zero headcount
-      var k = itemKey(it.n, it.unit);
+      var k = it.ingredientId; // v8 — the row key IS the ingredient id
       if (!map[k]) {
         // sections carried over from the old shape are often already named for
         // their meal ("Dinner — Proteins"); don't stutter the meal onto those
         var secLabel = nameKey(sec.name).indexOf(nameKey(meal.label)) === 0
           ? sec.name : meal.label + ' — ' + sec.name;
-        map[k] = { key: k, n: it.n, unit: it.unit, pack: it.pack, note: it.note,
+        // property order matters: verify-quantities diffs rows by JSON equality
+        map[k] = { key: k, n: ingredientById(k).name, unit: it.unit, pack: it.pack, note: it.note,
                    group: secLabel, total: 0, parts: [] };
         order.push(k);
       }
@@ -1292,7 +1395,7 @@
     return order.map(function (k) { return map[k]; });
   }
   function remaining(agg) {
-    return state.usePantry ? Math.max(0, agg.total - pantryNative(agg.n, agg.unit)) : agg.total;
+    return state.usePantry ? Math.max(0, agg.total - pantryNative(agg.key)) : agg.total;
   }
   function fmt(n, d) { return Number(n.toFixed(d)).toLocaleString(); }
   function qtyText(unit, q) {
@@ -1303,7 +1406,7 @@
   function listNeedsFor(p) {
     var total = 0, matched = false;
     eachItem(selectedDays(), function (day, meal, sec, it) {
-      if (nameKey(it.n) === nameKey(p.n) && unitsCompatible(it.unit, p.unit)) {
+      if (it.ingredientId === p.ingredientId) {
         matched = true; total += neededFor(day, it);
       }
     });
@@ -1493,7 +1596,7 @@
     var bits = [];
     if (agg.unit === 'oz' && rem > 0) bits.push('≈ ' + fmt((rem / LB) * KG, 1) + ' kg');
     if (agg.pack && rem > 0) bits.push('≈ ' + Math.ceil(rem / agg.pack[0]) + ' × ' + agg.pack[1]);
-    var p = pantryFor(agg.n, agg.unit);
+    var p = pantryForIng(agg.key);
     if (state.usePantry && p && (p.qty || 0) > 0) {
       bits.push('need ' + qtyText(agg.unit, agg.total) + ' − pantry ' + fmt(p.qty, 2) + ' ' + p.unit);
     }
@@ -1552,7 +1655,9 @@
         day = JSON.parse(JSON.stringify(src));
         day.id = newId('d'); day.name = n;
         // fresh ids (items too — v7), and re-point every item at the copied
-        // day's own groups
+        // day's own groups. `ingredientId` is deliberately NOT re-minted:
+        // the copy's rows must aggregate with the source's — sharing the
+        // ingredient is the feature, not a leak.
         var remap = {};
         day.groups.forEach(function (g) { var old = g.id; g.id = newId('g'); remap[old] = g.id; });
         day.meals.forEach(function (m) {
@@ -1979,7 +2084,7 @@
       if (!n || isNaN(p) || p < 0) { name.focus(); return; }
       var ids = boxes.filter(function (b) { return b.cb.checked; }).map(function (b) { return b.g.id; });
       commit({ op: 'add_menu_item', dayId: day.id, mealId: meal.id, sectionId: sec.id,
-        id: newId('i'), pantryId: newId('p'), name: n, unit: unit.value, per: p, groupIds: ids }, 'ui');
+        id: newId('i'), pantryId: newId('p'), ingredientId: newId('n'), name: n, unit: unit.value, per: p, groupIds: ids }, 'ui');
       renderMeals(); renderShopList(); renderPantry();
     });
     cancel.addEventListener('click', function () { form.remove(); link.style.display = ''; });
@@ -2097,7 +2202,7 @@
       var n = name.value.trim();
       var q = parseFloat(qty.value);
       if (!n) { name.focus(); return; }
-      commit({ op: 'add_pantry', row: { id: newId('p'), n: n, qty: isNaN(q) || q < 0 ? 0 : q, unit: unit.value } }, 'ui');
+      commit({ op: 'add_pantry', ingredientId: newId('n'), row: { id: newId('p'), n: n, qty: isNaN(q) || q < 0 ? 0 : q, unit: unit.value } }, 'ui');
       renderPantry(); renderShopList();
     });
     cancel.addEventListener('click', function () { form.remove(); link.style.display = ''; });
@@ -2121,7 +2226,7 @@
     if (!rows.length) return;
     var days = selectedDays();
     var drafts = rows.map(function (agg) {
-      var pNow = pantryFor(agg.n, agg.unit);
+      var pNow = pantryForIng(agg.key);
       return {
         agg: agg, unit: pantryDisplayUnit(agg.unit),
         now: pNow ? (pNow.qty || 0) : 0,
@@ -2231,7 +2336,7 @@
     // on replay and could produce figures nobody saw).
     var ops = [];
     drafts.forEach(function (d) {
-      var entry = pantryFor(d.agg.n, d.agg.unit);
+      var entry = pantryForIng(d.agg.key);
       if (!entry && d.result <= 0) return;
       var qty = Math.round(d.result * 100) / 100;
       if (entry) ops.push({ op: 'set_pantry', pantryId: entry.id, name: d.agg.n, unit: entry.unit, qty: qty });
@@ -2542,7 +2647,10 @@
         }
         var unit = op.unit === 'lb' || op.unit === 'pc' ? op.unit : (op.unit === 'oz' ? 'lb' : 'pc');
         return { label: 'Pantry: add ' + op.name + ' — ' + fmt(op.qty, 2) + ' ' + unit,
-          apply: function () { state.pantry.push({ id: op.id || newId('p'), uid: uid++, n: op.name, qty: op.qty, unit: unit }); } };
+          apply: function () {
+            var ing = resolveOrMintIngredient(op, op.name, unitClassOf(unit));
+            state.pantry.push({ id: op.id || newId('p'), uid: uid++, ingredientId: ing.id, n: ing.name, qty: op.qty, unit: unit });
+          } };
       case 'rename_pantry':
         p = aiFindPantry(op.name, op.unit, op.pantryId);
         if (!p || !op.newName) return { error: 'No pantry row called “' + op.name + '”' };
@@ -2594,8 +2702,9 @@
           : day.groups.map(function (x) { return x.id; });
         return { label: 'Add ' + op.name + ' — ' + op.per + ' ' + mu + '/person → ' + sec.name + ' (' + aiShort(day.name) + ')',
           apply: function () {
-            sec.items.push({ id: op.id || newId('i'), uid: uid++, n: op.name, unit: mu, per: op.per, groupIds: gids });
-            if (!pantryFor(op.name, mu)) state.pantry.push({ id: op.pantryId || newId('p'), uid: uid++, n: op.name, qty: 0, unit: mu === 'oz' ? 'lb' : 'pc' });
+            var ing = resolveOrMintIngredient(op, op.name, unitClassOf(mu));
+            sec.items.push({ id: op.id || newId('i'), uid: uid++, ingredientId: ing.id, n: ing.name, unit: mu, per: op.per, groupIds: gids });
+            if (!pantryForIng(ing.id)) state.pantry.push({ id: op.pantryId || newId('p'), uid: uid++, ingredientId: ing.id, n: ing.name, qty: 0, unit: mu === 'oz' ? 'lb' : 'pc' });
           } };
       case 'remove_menu_item':
         hit = aiFindItem(op.dayId, op.sectionId, op.name, op.itemId);
@@ -2726,7 +2835,11 @@
         if (!op.row || !op.row.id || !op.row.n || typeof op.row.qty !== 'number') return { error: 'Bad pantry row' };
         for (i = 0; i < state.pantry.length; i++) if (state.pantry[i].id === op.row.id) return { error: 'That pantry row already exists' };
         return { label: 'Pantry: add ' + op.row.n + ' — ' + fmt(op.row.qty, 2) + ' ' + (op.row.unit === 'pc' ? 'pc' : 'lb'),
-          apply: function () { state.pantry.push({ id: op.row.id, uid: uid++, n: op.row.n, qty: op.row.qty, unit: op.row.unit === 'pc' ? 'pc' : 'lb' }); } };
+          apply: function () {
+            var pu = op.row.unit === 'pc' ? 'pc' : 'lb';
+            var ing = resolveOrMintIngredient(op, op.row.n, unitClassOf(pu));
+            state.pantry.push({ id: op.row.id, uid: uid++, ingredientId: ing.id, n: ing.name, qty: op.row.qty, unit: pu });
+          } };
 
       default:
         return { error: 'Unknown change (' + op.op + ')' };

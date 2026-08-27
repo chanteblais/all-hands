@@ -84,7 +84,7 @@ const t = loadPage()
 const clone = (x) => JSON.parse(JSON.stringify(x))
 const base = t.migrate(clone(fixture))
 if (!base) throw new Error('migrate() returned null on ' + stateJson)
-if (base.version !== 7) throw new Error('expected migrate() to land on v7, got v' + base.version)
+if (base.version !== 8) throw new Error('expected migrate() to land on v8, got v' + base.version)
 
 let pass = 0, fail = 0
 function check(name, cond, detail) {
@@ -273,7 +273,7 @@ check('closeout pair: set_pantry(absolute) + uncheck_item', (() => {
 {
   const ops = [
     { op: 'set_headcount', dayId: day0.id, groupId: g0.id, count: 77 },
-    { op: 'add_menu_item', dayId: day0.id, mealId: meal0.id, sectionId: sec0.id, id: 'i-det-1', pantryId: 'p-det-1', name: 'Det item', unit: 'oz', per: 2 },
+    { op: 'add_menu_item', dayId: day0.id, mealId: meal0.id, sectionId: sec0.id, id: 'i-det-1', pantryId: 'p-det-1', ingredientId: 'n-det-1', name: 'Det item', unit: 'oz', per: 2 },
     { op: 'set_pantry', pantryId: pan0.id, name: pan0.n, unit: pan0.unit, qty: 5 },
     { op: 'remove_menu_item', dayId: day0.id, sectionId: sec0.id, itemId: item0.id, name: item0.n },
   ]
